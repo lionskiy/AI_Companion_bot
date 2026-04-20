@@ -200,14 +200,19 @@ ignore = "DeprecationWarning"
 
 ## docker-compose.dev.yml — сервисы
 
-| Сервис | Image | Порт | Назначение |
-|--------|-------|------|-----------|
-| `postgres` | postgres:16-alpine | 5432 | OLTP БД; `POSTGRES_DB=mirror` обязательно |
-| `qdrant` | qdrant/qdrant:latest | 6333, 6334 | Векторная БД |
-| `redis` | redis:7-alpine | 6379 | Кэш, сессии, mem_L1 |
-| `rabbitmq` | rabbitmq:3.13-management-alpine | 5672, 15672 | Celery broker |
-| `nats` | nats:2.10-alpine | 4222, 8222 | JetStream event bus (`command: ["--js"]` обязателен) |
-| `appsmith` | appsmith/appsmith-ce:latest | 3000 | Admin UI |
+| Сервис | Image | Порт (хост→контейнер) | Назначение |
+|--------|-------|----------------------|-----------|
+| `mirror_api` | build: . | **19100**→8000 | FastAPI приложение |
+| `celery_worker` | build: . | — | Celery worker |
+| `celery_beat` | build: . | — | Celery Beat (расписание) |
+| `postgres` | postgres:16-alpine | **19102**→5432 | OLTP БД; `POSTGRES_DB=mirror` обязательно |
+| `qdrant` | qdrant/qdrant:latest | **19104**→6333, **19105**→6334 | Векторная БД |
+| `redis` | redis:7-alpine | **19103**→6379 | Кэш, сессии, mem_L1 |
+| `rabbitmq` | rabbitmq:3.13-management-alpine | **19106**→5672, **19107**→15672 | Celery broker |
+| `nats` | nats:2.10-alpine | **19108**→4222, **19109**→8222 | JetStream event bus |
+| `appsmith` | appsmith/appsmith-ce:latest | **19101**→80 | Admin UI |
+
+> Диапазон 19100–19109 зарезервирован под Mirror local dev. Порты 5432, 6379, 8000, 8100 заняты другими проектами.
 
 Все сервисы с `restart: unless-stopped`. Данные в named volumes. Health checks для postgres, redis, rabbitmq.
 

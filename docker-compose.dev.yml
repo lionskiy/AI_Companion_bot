@@ -1,0 +1,149 @@
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "19102:5432"
+    environment:
+      POSTGRES_USER: mirror
+      POSTGRES_PASSWORD: mirror
+      POSTGRES_DB: mirror
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mirror -d mirror"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "19103:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "19104:6333"
+      - "19105:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    ports:
+      - "19106:5672"
+      - "19107:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    restart: unless-stopped
+    command: ["--js", "-m", "8222"]
+    ports:
+      - "19108:4222"
+      - "19109:8222"
+
+  appsmith:
+    image: appsmith/appsmith-ce:latest
+    restart: unless-stopped
+    ports:
+      - "19101:80"
+    volumes:
+      - appsmith_data:/appsmith-stacks
+    environment:
+      APPSMITH_ENCRYPTION_PASSWORD: ${APPSMITH_ENCRYPTION_PASSWORD}
+      APPSMITH_ENCRYPTION_SALT: ${APPSMITH_ENCRYPTION_SALT}
+    depends_on:
+      - postgres
+
+  # ── Application ─────────────────────────────────────────────────
+
+  mirror_api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "19100:8000"
+    volumes:
+      - ./mirror:/app/mirror  # hot reload — изменения применяются без пересборки
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mirror:mirror@postgres:5432/mirror
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      NATS_URL: nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      nats:
+        condition: service_started
+
+  celery_worker:
+    build: .
+    restart: unless-stopped
+    command: celery -A mirror.workers.celery_app worker --loglevel=info
+    volumes:
+      - ./mirror:/app/mirror
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mirror:mirror@postgres:5432/mirror
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      NATS_URL: nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  celery_beat:
+    build: .
+    restart: unless-stopped
+    command: celery -A mirror.workers.celery_app beat --loglevel=info
+    volumes:
+      - ./mirror:/app/mirror
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mirror:mirror@postgres:5432/mirror
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:
+  rabbitmq_data:
+  appsmith_data:
