@@ -2,10 +2,13 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Системные зависимости (geopy, kerykeion, asyncpg)
+# Системные зависимости (gcc для pyswisseph/kerykeion, libpq для asyncpg)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    g++ \
+    make \
     libpq-dev \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Зависимости Python
