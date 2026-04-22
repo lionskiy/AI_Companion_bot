@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir poetry==1.8.4 \
     && poetry install --no-root --no-interaction
 
 # Код приложения
+COPY alembic.ini ./
 COPY mirror/ ./mirror/
 
 EXPOSE 8000

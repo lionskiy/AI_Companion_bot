@@ -71,8 +71,8 @@ services:
     volumes:
       - appsmith_data:/appsmith-stacks
     environment:
-      APPSMITH_ENCRYPTION_PASSWORD: ${APPSMITH_ENCRYPTION_PASSWORD}
-      APPSMITH_ENCRYPTION_SALT: ${APPSMITH_ENCRYPTION_SALT}
+      APPSMITH_ENCRYPTION_PASSWORD: ${APPSMITH_ENCRYPTION_PASSWORD:-dev-appsmith-password}
+      APPSMITH_ENCRYPTION_SALT: ${APPSMITH_ENCRYPTION_SALT:-dev-appsmith-salt}
     depends_on:
       - postgres
 
@@ -84,7 +84,7 @@ services:
     ports:
       - "19100:8000"
     volumes:
-      - ./mirror:/app/mirror  # hot reload — изменения применяются без пересборки
+      - ./mirror:/app/mirror
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://mirror:mirror@postgres:5432/mirror
@@ -92,6 +92,13 @@ services:
       QDRANT_URL: http://qdrant:6333
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       NATS_URL: nats://nats:4222
+      BASE_URL: http://localhost:19100
+      POLLING_MODE: "true"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -117,6 +124,11 @@ services:
       QDRANT_URL: http://qdrant:6333
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       NATS_URL: nats://nats:4222
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy

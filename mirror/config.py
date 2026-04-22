@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # Admin
     admin_token: SecretStr
 
+    # Polling mode for local dev (no public URL needed)
+    polling_mode: bool = False
+
     # Sentry
     sentry_dsn: str = ""
 

@@ -45,3 +45,7 @@ qdrant_data/
 redis_data/
 rabbitmq_data/
 appsmith_data/
+
+# Claude Code / Cursor IDE
+.claude/
+.cursor/

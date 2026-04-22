@@ -7,7 +7,7 @@ celery_app = Celery(
     "mirror",
     broker=settings.rabbitmq_url,
     backend=None,  # результаты не нужны
-    include=["mirror.workers.tasks.memory", "mirror.workers.tasks.daily_ritual"],
+    include=["mirror.workers.tasks.memory", "mirror.workers.tasks.daily_ritual", "mirror.workers.tasks.profile"],
 )
 
 celery_app.conf.update(

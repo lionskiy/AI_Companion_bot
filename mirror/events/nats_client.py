@@ -2,9 +2,13 @@ import json
 from typing import Callable
 
 import nats
+import nats.js.errors
 import structlog
 
 logger = structlog.get_logger()
+
+MIRROR_STREAM = "MIRROR"
+MIRROR_SUBJECTS = ["mirror.>"]
 
 
 class NATSClient:
@@ -15,7 +19,21 @@ class NATSClient:
     async def connect(self, url: str) -> None:
         self._nc = await nats.connect(url)
         self._js = self._nc.jetstream()
+        await self._ensure_stream()
         logger.info("nats.connected", url=url)
+
+    async def _ensure_stream(self) -> None:
+        try:
+            await self._js.find_stream(MIRROR_SUBJECTS[0])
+            logger.info("nats.stream_exists", stream=MIRROR_STREAM)
+        except Exception:
+            await self._js.add_stream(
+                name=MIRROR_STREAM,
+                subjects=MIRROR_SUBJECTS,
+                retention="limits",
+                max_age=7 * 24 * 3600,  # 7 дней
+            )
+            logger.info("nats.stream_created", stream=MIRROR_STREAM)
 
     async def publish(self, subject: str, payload: dict) -> None:
         data = json.dumps(payload).encode()
@@ -27,7 +45,7 @@ class NATSClient:
             await handler(data)
             await msg.ack()
 
-        await self._js.subscribe(subject, cb=_handler)
+        await self._js.subscribe(subject, cb=_handler, durable=subject.replace(".", "_"))
         logger.info("nats.subscribed", subject=subject)
 
     async def close(self) -> None:

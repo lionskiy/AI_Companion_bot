@@ -1,0 +1,1134 @@
+from fastapi import APIRouter
+from fastapi.responses import HTMLResponse
+
+ui_router = APIRouter(prefix="/admin/ui", tags=["admin-ui"])
+
+_HTML = """<!DOCTYPE html>
+<html lang="ru" data-bs-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mirror Admin</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+<style>
+/* ── Base ── */
+:root{
+  --bg-base:#0d1117;
+  --bg-surface:#161b22;
+  --bg-elevated:#1c2230;
+  --border:#30363d;
+  --text-primary:#e6edf3;
+  --text-secondary:#8b949e;
+  --text-muted:#6e7681;
+  --accent:#7c3aed;
+  --accent-hover:#6d28d9;
+  --accent-glow:rgba(124,58,237,.3);
+}
+body{background:var(--bg-base);color:var(--text-primary);min-height:100vh;font-size:.92rem}
+
+/* ── Bootstrap dark overrides ── */
+.form-control,.form-select{background:var(--bg-elevated)!important;border-color:var(--border)!important;color:var(--text-primary)!important}
+.form-control:focus,.form-select:focus{border-color:var(--accent)!important;box-shadow:0 0 0 .2rem var(--accent-glow)!important;background:var(--bg-elevated)!important;color:var(--text-primary)!important}
+.form-control::placeholder{color:var(--text-muted)!important}
+.form-control:disabled,.form-select:disabled{background:#12161d!important;color:var(--text-muted)!important;opacity:.6}
+.form-check-input{background-color:var(--bg-elevated);border-color:var(--border)}
+.input-group-text{background:var(--bg-elevated);border-color:var(--border);color:var(--text-secondary)}
+label,.form-label{color:#c0c8d4!important}
+
+/* ── Sidebar ── */
+.sidebar{width:220px;min-height:100vh;background:var(--bg-surface);border-right:1px solid var(--border);position:fixed;top:0;left:0;z-index:100;display:flex;flex-direction:column}
+.sidebar .logo{padding:20px 16px 12px;font-size:1.15rem;font-weight:700;color:#c084fc;border-bottom:1px solid var(--border)}
+.sidebar .logo span{font-size:.72rem;color:var(--text-muted);display:block;font-weight:400;margin-top:2px}
+.sidebar .nav-link{color:#9ca3af;padding:9px 14px;border-radius:7px;margin:1px 8px;font-size:.875rem;transition:background .15s,color .15s}
+.sidebar .nav-link:hover,.sidebar .nav-link.active{background:#21262d;color:#f0f6fc}
+.sidebar .nav-link i{width:18px;margin-right:6px}
+.sidebar-footer{padding:12px 8px;border-top:1px solid var(--border);margin-top:auto}
+
+/* ── Main ── */
+.main{margin-left:220px;padding:28px 32px}
+
+/* ── Cards ── */
+.card{background:var(--bg-surface);border:1px solid var(--border);border-radius:10px}
+.card-header{background:var(--bg-elevated);border-bottom:1px solid var(--border);border-radius:10px 10px 0 0!important;font-weight:600;color:var(--text-primary);padding:.75rem 1rem}
+
+/* ── Stat cards ── */
+.stat-card{border-radius:10px;padding:1.1rem}
+.stat-card.blue{background:linear-gradient(135deg,#1a1f4e,#252d6e);border:1px solid #3d4fb5}
+.stat-card.green{background:linear-gradient(135deg,#0a2318,#0d3321);border:1px solid #1a5e38}
+.stat-card.purple{background:linear-gradient(135deg,#21104a,#2d1666);border:1px solid #5b2fa6}
+.stat-card.rose{background:linear-gradient(135deg,#3a0a18,#5a1228);border:1px solid #8b1a35}
+.stat-num{font-size:2.4rem;font-weight:700;color:#f1f5f9;line-height:1.1;margin:.3rem 0 .1rem}
+.stat-label{font-size:.72rem;color:#94a3b8;letter-spacing:.06em;text-transform:uppercase}
+
+/* ── Tables ── */
+.table{color:var(--text-primary);--bs-table-bg:transparent;--bs-table-striped-bg:rgba(255,255,255,.02);--bs-table-hover-bg:rgba(255,255,255,.04)}
+.table th{border-color:var(--border);color:var(--text-muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;font-weight:600;padding:.6rem .75rem;background:var(--bg-elevated)}
+.table td{border-color:var(--border);color:var(--text-primary);vertical-align:middle}
+.table-hover tbody tr:hover td{background:rgba(124,58,237,.06)}
+
+/* ── Buttons ── */
+.btn-primary{background:var(--accent);border-color:var(--accent);font-weight:500}
+.btn-primary:hover,.btn-primary:focus{background:var(--accent-hover);border-color:var(--accent-hover)}
+.btn-outline-secondary{border-color:var(--border);color:#9ca3af}
+.btn-outline-secondary:hover{background:var(--bg-elevated);color:var(--text-primary);border-color:#6b7280}
+.btn-save{background:#1a3a1a;border:1px solid #2e6b2e;color:#6fcf6f;font-size:.8rem;padding:3px 12px;border-radius:6px;white-space:nowrap}
+.btn-save:hover{background:#22442a;border-color:#4caf50;color:#90ee90}
+
+/* ── Routing table ── */
+.routing-row td{padding:.65rem .75rem}
+.routing-row:hover td{background:rgba(124,58,237,.05)}
+.task-label{font-weight:500;color:var(--text-primary);font-size:.85rem}
+.task-code{font-size:.72rem;color:var(--text-muted);font-family:monospace}
+.provider-btn{padding:3px 10px;font-size:.78rem;border-radius:20px;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-secondary);cursor:pointer;transition:all .15s}
+.provider-btn.active-openai{background:#0a2a1a;border-color:#22c55e;color:#4ade80}
+.provider-btn.active-anthropic{background:#1a1230;border-color:#a78bfa;color:#c4b5fd}
+
+/* ── Misc ── */
+.section{display:none}.section.active{display:block}
+.toast-container{position:fixed;bottom:20px;right:20px;z-index:9999}
+pre{background:#0a0e14;border:1px solid var(--border);border-radius:8px;padding:12px;font-size:.8rem;color:#a5f3fc}
+textarea.form-control{font-family:monospace;font-size:.85rem}
+.badge{font-weight:500}
+.text-secondary{color:var(--text-secondary)!important}
+
+/* ── Login ── */
+#login-screen{position:fixed;inset:0;background:var(--bg-base);display:flex;align-items:center;justify-content:center;z-index:9999}
+.login-box{background:var(--bg-surface);border:1px solid var(--border);border-radius:16px;padding:40px;width:360px}
+.login-box h4{color:#c084fc;font-weight:700}
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-screen">
+  <div class="login-box">
+    <h4 class="mb-1"><i class="bi bi-shield-lock"></i> Mirror Admin</h4>
+    <p class="text-secondary mb-4" style="font-size:.85rem">Введи admin token для входа</p>
+    <div class="mb-3">
+      <input type="password" id="token-input" class="form-control" placeholder="admin token" autocomplete="off">
+    </div>
+    <button class="btn btn-primary w-100" onclick="doLogin()">Войти</button>
+    <div id="login-error" class="text-danger mt-2" style="font-size:.85rem"></div>
+  </div>
+</div>
+
+<!-- Sidebar -->
+<div class="sidebar">
+  <div class="logo">Mirror Admin<span>Stage 1</span></div>
+  <nav class="nav flex-column mt-2">
+    <a class="nav-link active" onclick="nav('stats')" href="#"><i class="bi bi-bar-chart-line"></i> Dashboard</a>
+    <a class="nav-link" onclick="nav('config')" href="#"><i class="bi bi-sliders"></i> Конфиг</a>
+    <a class="nav-link" onclick="nav('routing')" href="#"><i class="bi bi-diagram-3"></i> LLM Routing</a>
+    <a class="nav-link" onclick="nav('quota')" href="#"><i class="bi bi-speedometer2"></i> Квоты</a>
+    <a class="nav-link" onclick="nav('users')" href="#"><i class="bi bi-people"></i> Пользователи</a>
+    <a class="nav-link" onclick="nav('kb')" href="#"><i class="bi bi-database"></i> База знаний</a>
+    <div style="border-top:1px solid #30363d;margin:8px 8px 4px;padding-top:8px;font-size:.7rem;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;padding-left:8px">Инфраструктура</div>
+    <a class="nav-link" href="http://localhost:19104/dashboard" target="_blank"><i class="bi bi-boxes"></i> Qdrant <i class="bi bi-box-arrow-up-right" style="font-size:.65rem;opacity:.5"></i></a>
+    <a class="nav-link" href="http://localhost:19107" target="_blank"><i class="bi bi-hdd-network"></i> RabbitMQ <i class="bi bi-box-arrow-up-right" style="font-size:.65rem;opacity:.5"></i></a>
+    <a class="nav-link" href="http://localhost:19109" target="_blank"><i class="bi bi-lightning-charge"></i> NATS <i class="bi bi-box-arrow-up-right" style="font-size:.65rem;opacity:.5"></i></a>
+    <a class="nav-link" href="http://localhost:19101" target="_blank"><i class="bi bi-window"></i> Appsmith <i class="bi bi-box-arrow-up-right" style="font-size:.65rem;opacity:.5"></i></a>
+    <a class="nav-link" href="http://localhost:19100/docs" target="_blank"><i class="bi bi-code-slash"></i> API Docs <i class="bi bi-box-arrow-up-right" style="font-size:.65rem;opacity:.5"></i></a>
+  </nav>
+  <div class="sidebar-footer">
+    <button class="btn btn-outline-secondary btn-sm w-100" onclick="logout()"><i class="bi bi-box-arrow-left"></i> Выйти</button>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="main">
+
+  <!-- Stats -->
+  <div id="sec-stats" class="section active">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h5 class="mb-0">Dashboard</h5>
+      <button class="btn btn-outline-secondary btn-sm" onclick="refreshSection('stats')"><i class="bi bi-arrow-clockwise"></i> Обновить</button>
+    </div>
+    <!-- Row 1: общие метрики -->
+    <div class="row g-3 mb-3">
+      <div class="col-md-3"><div class="stat-card blue">
+        <div class="stat-label">Всего юзеров</div>
+        <div class="stat-num" id="s-users">—</div>
+      </div></div>
+      <div class="col-md-3"><div class="stat-card green">
+        <div class="stat-label">Активны сегодня</div>
+        <div class="stat-num" id="s-active">—</div>
+      </div></div>
+      <div class="col-md-3"><div class="stat-card purple">
+        <div class="stat-label">Ритуалов отправлено</div>
+        <div class="stat-num" id="s-rituals">—</div>
+      </div></div>
+      <div class="col-md-3"><div class="stat-card rose">
+        <div class="stat-num" id="s-msgs">—</div>
+        <div class="stat-label">Сообщений сегодня</div>
+      </div></div>
+    </div>
+    <!-- Row 2: intent-метрики -->
+    <div class="row g-3 mb-4">
+      <div class="col-md-4"><div class="stat-card" style="background:linear-gradient(135deg,#1a1230,#261848);border:1px solid #7c3aed">
+        <div class="stat-label">🔮 Таро сегодня</div>
+        <div class="stat-num" id="s-tarot">—</div>
+      </div></div>
+      <div class="col-md-4"><div class="stat-card" style="background:linear-gradient(135deg,#0a1e2e,#0f2d42);border:1px solid #0ea5e9">
+        <div class="stat-label">⭐ Астрология сегодня</div>
+        <div class="stat-num" id="s-astro">—</div>
+      </div></div>
+      <div class="col-md-4"><div class="stat-card" style="background:linear-gradient(135deg,#1a1f1a,#212b21);border:1px solid #4ade80">
+        <div class="stat-label">💬 Просто чат сегодня</div>
+        <div class="stat-num" id="s-chat">—</div>
+      </div></div>
+    </div>
+    <div class="card"><div class="card-header p-3">Последние пользователи</div>
+      <div class="card-body p-0">
+        <table class="table table-hover mb-0" id="users-table-mini">
+          <thead><tr><th>User ID</th><th>ФИО</th><th>@username</th><th>TG</th><th>Тариф</th><th>Ритуал</th><th>Создан</th></tr></thead>
+          <tbody id="users-tbody-mini"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Config -->
+  <div id="sec-config" class="section">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h5 class="mb-0">Конфиг приложения</h5>
+      <button class="btn btn-outline-secondary btn-sm" onclick="refreshSection('config')"><i class="bi bi-arrow-clockwise"></i> Обновить</button>
+    </div>
+    <div id="config-list"></div>
+  </div>
+
+  <!-- Routing -->
+  <div id="sec-routing" class="section">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h5 class="mb-0">LLM Routing</h5>
+      <button class="btn btn-outline-secondary btn-sm" onclick="refreshSection('routing')"><i class="bi bi-arrow-clockwise"></i> Обновить</button>
+    </div>
+
+    <!-- API Keys -->
+    <div class="card mb-4">
+      <div class="card-header p-3"><i class="bi bi-key"></i> API-ключи провайдеров</div>
+      <div class="card-body">
+        <p style="font-size:.82rem;color:#8b949e;margin-bottom:1rem">Ключи хранятся только в памяти процесса до перезапуска. Для постоянного хранения пропишите в <code>.env</code>.</p>
+        <div class="row g-3" id="api-keys-row">
+          <!-- populated by JS -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Routing table -->
+    <div class="card">
+      <div class="card-header p-3 d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-diagram-3"></i> Маршрутизация задач → модели</span>
+        <span style="font-size:.75rem;color:#8b949e">Изменения применяются сразу, без перезапуска</span>
+      </div>
+      <div class="card-body p-0">
+        <table class="table table-hover mb-0" style="font-size:.83rem">
+          <thead>
+            <tr>
+              <th style="width:200px">task_kind</th>
+              <th style="width:70px">Tier</th>
+              <th style="width:110px">Provider</th>
+              <th style="width:210px">Model</th>
+              <th style="width:90px">Max tokens</th>
+              <th style="width:65px">Temp</th>
+              <th style="width:200px">Fallback model</th>
+              <th style="width:50px"></th>
+            </tr>
+          </thead>
+          <tbody id="routing-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quota -->
+  <div id="sec-quota" class="section">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h5 class="mb-0">Квоты по тарифам</h5>
+      <button class="btn btn-outline-secondary btn-sm" onclick="refreshSection('quota')"><i class="bi bi-arrow-clockwise"></i> Обновить</button>
+    </div>
+    <div id="quota-list" class="row g-3"></div>
+  </div>
+
+  <!-- Users -->
+  <div id="sec-users" class="section">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h5 class="mb-0">Пользователи</h5>
+      <button class="btn btn-outline-secondary btn-sm" onclick="refreshSection('users')"><i class="bi bi-arrow-clockwise"></i> Обновить</button>
+    </div>
+    <div class="card"><div class="card-body p-0">
+      <table class="table table-hover mb-0">
+        <thead><tr><th>User ID</th><th>ФИО</th><th>@username</th><th>TG</th><th>Тариф</th><th>Ритуал</th><th>Создан</th></tr></thead>
+        <tbody id="users-tbody"></tbody>
+      </table>
+    </div></div>
+  </div>
+
+  <!-- KB -->
+  <div id="sec-kb" class="section">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h5 class="mb-0">База знаний</h5>
+      <button class="btn btn-outline-secondary btn-sm" onclick="refreshSection('kb')"><i class="bi bi-arrow-clockwise"></i> Обновить</button>
+    </div>
+
+    <!-- Collection management -->
+    <div class="card mb-3">
+      <div class="card-header p-3 d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-collection"></i> Управление коллекциями</span>
+        <button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('kb-new-col-form').style.display=document.getElementById('kb-new-col-form').style.display==='none'?'':'none'">
+          <i class="bi bi-plus-lg"></i> Создать
+        </button>
+      </div>
+      <div class="card-body">
+        <div id="kb-new-col-form" style="display:none;margin-bottom:1rem;padding:12px;background:#0d1117;border-radius:8px;border:1px solid #30363d">
+          <div style="font-size:.85rem;color:#c8cdd4;margin-bottom:.5rem">Новая коллекция (только латиница, цифры, _)</div>
+          <div class="d-flex gap-2">
+            <input type="text" id="new-col-name" class="form-control form-control-sm" placeholder="knowledge_dreams" style="max-width:260px">
+            <button class="btn btn-sm btn-primary" onclick="createCollection()"><i class="bi bi-plus-lg"></i> Создать</button>
+          </div>
+          <div style="font-size:.75rem;color:#8b949e;margin-top:.4rem">Коллекция сразу доступна для импорта данных. Вектор: 3072, cosine.</div>
+        </div>
+        <div id="kb-collections-list">
+          <div style="color:#8b949e;font-size:.85rem">Загрузка...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header p-3"><i class="bi bi-plus-circle"></i> Добавить записи</div>
+      <div class="card-body">
+        <!-- Tabs -->
+        <ul class="nav nav-tabs mb-3" style="border-color:#30363d">
+          <li class="nav-item">
+            <a class="nav-link active" id="kb-tab-text" onclick="kbTab('text')" href="#" style="color:#8b949e;border-color:#30363d transparent transparent">
+              <i class="bi bi-pencil-square"></i> Текст вручную
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" id="kb-tab-url" onclick="kbTab('url')" href="#" style="color:#8b949e">
+              <i class="bi bi-link-45deg"></i> По URL
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" id="kb-tab-file" onclick="kbTab('file')" href="#" style="color:#8b949e">
+              <i class="bi bi-file-earmark-arrow-up"></i> Загрузить файл
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" id="kb-tab-dataset" onclick="kbTab('dataset')" href="#" style="color:#8b949e">
+              <i class="bi bi-database-add"></i> Датасеты
+            </a>
+          </li>
+        </ul>
+
+        <!-- Tab: Text -->
+        <div id="kb-pane-text">
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">КОЛЛЕКЦИЯ</label>
+              <select class="form-select" id="kb-col"></select>
+            </div>
+            <div class="col-md-8">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ТЕМА / НАЗВАНИЕ</label>
+              <input type="text" class="form-control" id="kb-topic" placeholder="Например: Шут, Овен, Когнитивные искажения">
+            </div>
+            <div class="col-12">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ТЕКСТ</label>
+              <textarea class="form-control" id="kb-text" rows="6" placeholder="Содержимое записи..."></textarea>
+            </div>
+            <div class="col-12">
+              <button class="btn btn-primary" onclick="addKBEntry()" id="kb-add-btn">
+                <i class="bi bi-cloud-upload"></i> Добавить
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: URL -->
+        <div id="kb-pane-url" style="display:none">
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">КОЛЛЕКЦИЯ</label>
+              <select class="form-select" id="kb-url-col"></select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ТЕМА (необязательно)</label>
+              <input type="text" class="form-control" id="kb-url-topic" placeholder="Оставь пустым — возьмём из URL">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ЯЗЫК ИСТОЧНИКА</label>
+              <select class="form-select" id="kb-url-lang">
+                <option value="auto">Авто</option><option value="en">EN</option><option value="ru">RU</option>
+              </select>
+            </div>
+            <div class="col-12">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">URL</label>
+              <input type="url" class="form-control" id="kb-url-input" placeholder="https://...">
+            </div>
+            <div class="col-12">
+              <button class="btn btn-primary" onclick="addKBUrl()" id="kb-url-btn">
+                <i class="bi bi-cloud-download"></i> Загрузить и добавить
+              </button>
+              <span id="kb-url-result" class="ms-3 text-secondary" style="font-size:.85rem"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: File -->
+        <div id="kb-pane-file" style="display:none">
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">КОЛЛЕКЦИЯ</label>
+              <select class="form-select" id="kb-file-col"></select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ТЕМА (необязательно)</label>
+              <input type="text" class="form-control" id="kb-file-topic" placeholder="Оставь пустым — возьмём из имени файла">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ЯЗЫК ИСТОЧНИКА</label>
+              <select class="form-select" id="kb-file-lang">
+                <option value="auto">Авто</option><option value="en">EN</option><option value="ru">RU</option>
+              </select>
+            </div>
+            <div class="col-12">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ФАЙЛ</label>
+              <input type="file" class="form-control" id="kb-file-input" accept=".txt,.md,.pdf,.docx,.epub,.json,.csv,.zip,.rst,.log">
+              <div class="mt-1" style="font-size:.75rem;color:#555">
+                Поддерживается: TXT, MD, PDF, DOCX, EPUB, JSON, CSV, ZIP (архив с файлами)
+              </div>
+            </div>
+            <div class="col-12">
+              <button class="btn btn-primary" onclick="addKBFile()" id="kb-file-btn">
+                <i class="bi bi-upload"></i> Загрузить файл
+              </button>
+              <span id="kb-file-result" class="ms-3 text-secondary" style="font-size:.85rem"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: Dataset -->
+        <div id="kb-pane-dataset" style="display:none">
+          <div class="alert" style="background:#1a2535;border:1px solid #2d4a6e;border-radius:8px;font-size:.82rem;color:#7cb9e8;margin-bottom:1rem">
+            <i class="bi bi-info-circle me-2"></i>
+            <strong>Поддерживаются три источника:</strong><br>
+            <span style="color:#a8d8f0">📄 Файл</span> — прямая ссылка на .json/.jsonl/.csv (Raw-ссылка на GitHub)<br>
+            <span style="color:#a8d8f0">📦 GitHub репо</span> — ссылка <code style="color:#7dd3fc">github.com/user/repo</code> — скачает весь репозиторий<br>
+            <span style="color:#a8d8f0">🤗 HuggingFace</span> — ссылка <code style="color:#7dd3fc">huggingface.co/datasets/user/repo</code><br>
+            <span style="color:#86efac">Все записи сохраняются в двух языковых версиях (оригинал + перевод)</span> для точного семантического поиска.
+          </div>
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">КОЛЛЕКЦИЯ</label>
+              <select class="form-select" id="kb-ds-col"></select>
+            </div>
+            <div class="col-md-8">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ПРЕФИКС ТЕМЫ (необязательно)</label>
+              <input type="text" class="form-control" id="kb-ds-prefix" placeholder="Например: КПТ, RECCON, Терапия">
+            </div>
+            <div class="col-12">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">URL ФАЙЛА ДАТАСЕТА</label>
+              <input type="url" class="form-control" id="kb-ds-url" placeholder="https://huggingface.co/.../raw/main/data.json">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ПОЛЕ ВОПРОСА (авто если пусто)</label>
+              <input type="text" class="form-control form-control-sm" id="kb-ds-qfield" placeholder="question / context / input">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ПОЛЕ ОТВЕТА (авто если пусто)</label>
+              <input type="text" class="form-control form-control-sm" id="kb-ds-afield" placeholder="answer / response / output">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ЛИМИТ ЗАПИСЕЙ (0 = все)</label>
+              <input type="number" class="form-control form-control-sm" id="kb-ds-limit" value="0" min="0">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" style="font-size:.8rem;color:#8b949e">ЯЗЫК ИСТОЧНИКА</label>
+              <select class="form-select form-select-sm" id="kb-ds-lang">
+                <option value="auto">Авто-определение</option>
+                <option value="en">English</option>
+                <option value="ru">Русский</option>
+              </select>
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+              <div style="font-size:.76rem;color:#6fcf6f;line-height:1.4">
+                <i class="bi bi-translate"></i> Обе языковые версии<br>сохраняются автоматически
+              </div>
+            </div>
+            <div class="col-12">
+              <button class="btn btn-primary" onclick="addKBDataset()" id="kb-ds-btn">
+                <i class="bi bi-cloud-arrow-down"></i> Импортировать датасет
+              </button>
+              <span id="kb-ds-result" class="ms-3 text-secondary" style="font-size:.85rem"></span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- HuggingFace Catalog Search -->
+    <div class="card mt-3">
+      <div class="card-header p-3"><i class="bi bi-search"></i> 🤗 Поиск датасетов HuggingFace</div>
+      <div class="card-body">
+        <div class="row g-2 mb-3">
+          <div class="col">
+            <input type="text" id="hf-search-q" class="form-control" placeholder="Поиск: psychology, CBT, therapy, mental health..." onkeydown="if(event.key==='Enter')searchHF()">
+          </div>
+          <div class="col-auto">
+            <button class="btn btn-outline-secondary" onclick="searchHF()"><i class="bi bi-search"></i> Найти</button>
+          </div>
+        </div>
+        <div style="font-size:.75rem;color:#b0bec5;margin-bottom:.5rem">Быстрые теги:</div>
+        <div class="d-flex flex-wrap gap-1 mb-3" id="hf-quick-tags">
+          <button class="btn btn-sm" style="background:#21262d;color:#a78bfa;border:1px solid #4338ca;font-size:.75rem" onclick="searchHFTag('mental-health')">mental-health</button>
+          <button class="btn btn-sm" style="background:#21262d;color:#a78bfa;border:1px solid #4338ca;font-size:.75rem" onclick="searchHFTag('psychology')">psychology</button>
+          <button class="btn btn-sm" style="background:#21262d;color:#a78bfa;border:1px solid #4338ca;font-size:.75rem" onclick="searchHFQ('CBT therapy')">CBT therapy</button>
+          <button class="btn btn-sm" style="background:#21262d;color:#a78bfa;border:1px solid #4338ca;font-size:.75rem" onclick="searchHFQ('counseling conversation')">counseling</button>
+          <button class="btn btn-sm" style="background:#21262d;color:#a78bfa;border:1px solid #4338ca;font-size:.75rem" onclick="searchHFQ('emotion dialogue')">emotion dialogue</button>
+        </div>
+        <div id="hf-results" style="min-height:40px"></div>
+      </div>
+    </div>
+
+    <div class="card mt-3">
+      <div class="card-header p-3 d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-list-ul"></i> Записи</span>
+        <div class="d-flex gap-2 align-items-center">
+          <select class="form-select form-select-sm" id="kb-browse-col" style="width:200px" onchange="loadKBEntries()"></select>
+          <button class="btn btn-outline-secondary btn-sm" onclick="loadKBEntries()"><i class="bi bi-arrow-clockwise"></i></button>
+        </div>
+      </div>
+      <div class="card-body p-0">
+        <table class="table table-hover mb-0">
+          <thead><tr><th style="width:200px">Тема</th><th>Превью текста</th><th style="width:80px"></th></tr></thead>
+          <tbody id="kb-entries-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Toast -->
+<div class="toast-container">
+  <div id="toast" class="toast align-items-center text-white border-0" role="alert">
+    <div class="d-flex"><div class="toast-body" id="toast-body"></div>
+    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const API = '';
+let TOKEN = sessionStorage.getItem('admin_token') || '';
+const KB_COLLECTIONS = ['knowledge_tarot', 'knowledge_astro', 'knowledge_psych'];
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+async function doLogin() {
+  TOKEN = document.getElementById('token-input').value.trim();
+  const ok = await apiGet('/admin/stats');
+  if (ok) { sessionStorage.setItem('admin_token', TOKEN); showApp(); }
+  else { document.getElementById('login-error').textContent = 'Неверный токен'; }
+}
+function logout() { sessionStorage.removeItem('admin_token'); location.reload(); }
+document.getElementById('token-input').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+
+function showApp() {
+  document.getElementById('login-screen').style.display = 'none';
+  loadSection('stats');
+}
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: {'X-Admin-Token': TOKEN} };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const r = await fetch(API + path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+const apiGet    = path => api('GET', path).catch(() => null);
+const apiPut    = (path, body) => api('PUT', path, body);
+const apiPost   = (path, body) => api('POST', path, body);
+const apiDelete = path => api('DELETE', path);
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function toast(msg, ok=true) {
+  const el = document.getElementById('toast');
+  el.className = `toast align-items-center text-white border-0 bg-${ok?'success':'danger'}`;
+  document.getElementById('toast-body').textContent = msg;
+  new bootstrap.Toast(el, {delay:3000}).show();
+}
+
+// ── Nav ───────────────────────────────────────────────────────────────────────
+const _loadedSections = new Set();
+
+function nav(name) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.getElementById('sec-' + name).classList.add('active');
+  document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+  event.target.closest('.nav-link').classList.add('active');
+  loadSection(name);
+}
+function loadSection(name, force=false) {
+  if (!force && _loadedSections.has(name)) return;
+  _loadedSections.add(name);
+  const fn = {stats: loadStats, config: loadConfig, routing: loadRouting, quota: loadQuota, users: loadUsers, kb: loadKB};
+  if (fn[name]) fn[name]();
+}
+function refreshSection(name) {
+  _loadedSections.delete(name);
+  loadSection(name);
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────────────
+async function loadStats() {
+  const [stats, users] = await Promise.all([apiGet('/admin/stats'), apiGet('/admin/users?limit=5')]);
+  if (!stats) return;
+  document.getElementById('s-users').textContent = stats.total_users;
+  document.getElementById('s-active').textContent = stats.active_today;
+  document.getElementById('s-rituals').textContent = stats.rituals_sent_today;
+  document.getElementById('s-msgs').textContent = stats.messages_today;
+  document.getElementById('s-tarot').textContent = stats.tarot_today ?? 0;
+  document.getElementById('s-astro').textContent = stats.astrology_today ?? 0;
+  document.getElementById('s-chat').textContent = stats.chat_today ?? 0;
+  const tbody = document.getElementById('users-tbody-mini');
+  tbody.innerHTML = (users||[]).map(userRow).join('');
+}
+
+// ── Config ────────────────────────────────────────────────────────────────────
+async function loadConfig() {
+  const items = await apiGet('/admin/config');
+  if (!items) return;
+  document.getElementById('config-list').innerHTML = items.map(item => `
+    <div class="card mb-3">
+      <div class="card-header p-3 d-flex justify-content-between align-items-center">
+        <code style="color:#a78bfa">${item.key}</code>
+      </div>
+      <div class="card-body">
+        <textarea class="form-control mb-2" id="cfg-${item.key}" rows="${item.value.length>100?6:3}">${escHtml(item.value)}</textarea>
+        <button class="btn btn-primary btn-sm" onclick="saveConfig('${item.key}')">
+          <i class="bi bi-save"></i> Сохранить
+        </button>
+      </div>
+    </div>`).join('');
+}
+async function saveConfig(key) {
+  const value = document.getElementById('cfg-' + key).value;
+  try { await apiPut('/admin/config/' + key, {value}); toast('Сохранено: ' + key); }
+  catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+// ── Routing ───────────────────────────────────────────────────────────────────
+const TASK_KIND_LABELS = {
+  main_chat: 'Чат (free/basic)',
+  main_chat_premium: 'Чат (plus/pro)',
+  intent_classify: 'Классификация интента',
+  crisis_classify: 'Кризисный детектор',
+  memory_summarize: 'Сжатие памяти',
+  memory_extract_facts: 'Извлечение фактов',
+  tarot_interpret: 'Таро: интерпретация',
+  astro_interpret: 'Астрология: интерпретация',
+  game_narration: 'Нарратив игры',
+  proactive_compose: 'Проактивные сообщения',
+  persona_evolve: 'Развитие персоны',
+  embedding: 'Эмбеддинг (Qdrant)',
+};
+
+// Cache of models per provider, loaded once
+const _modelCache = {openai: [], anthropic: []};
+
+async function _loadModels(provider) {
+  if (_modelCache[provider].length) return _modelCache[provider];
+  const res = await apiGet('/admin/llm-models?provider=' + provider);
+  if (res && res.models) _modelCache[provider] = res.models;
+  return _modelCache[provider];
+}
+
+function _buildModelSelect(id, models, currentValue, style='') {
+  // Always include current value even if not in list
+  const hasValue = models.some(m => m.id === currentValue);
+  const extra = (!hasValue && currentValue) ? `<option value="${escHtml(currentValue)}" selected>${escHtml(currentValue)}</option>` : '';
+  const opts = models.map(m =>
+    `<option value="${m.id}" ${m.id===currentValue?'selected':''}>${m.label||m.id}</option>`
+  ).join('');
+  return `<select class="form-select form-select-sm" id="${id}" style="min-width:200px${style?';'+style:''}">${extra}${opts}</select>`;
+}
+
+async function loadRouting() {
+  loadLLMKeys();
+  // Only fetch model lists if cache is empty
+  const needOAI = !_modelCache.openai.length;
+  const needAnt = !_modelCache.anthropic.length;
+  const fetches = [apiGet('/admin/routing')];
+  if (needOAI) fetches.push(apiGet('/admin/llm-models?provider=openai'));
+  if (needAnt) fetches.push(apiGet('/admin/llm-models?provider=anthropic'));
+  const results = await Promise.all(fetches);
+  const items = results[0];
+  let idx = 1;
+  if (needOAI) { const r = results[idx++]; if (r?.models) _modelCache.openai = r.models; }
+  if (needAnt) { const r = results[idx++]; if (r?.models) _modelCache.anthropic = r.models; }
+  if (!items) return;
+
+  document.getElementById('routing-tbody').innerHTML = items.map(r => {
+    const fb = (r.fallback_chain||[]).map(f => f.model_id).join(', ');
+    const label = TASK_KIND_LABELS[r.task_kind] || r.task_kind;
+    const isEmbed = r.task_kind === 'embedding';
+    const isOAI = r.provider_id === 'openai';
+    const models = isOAI ? _modelCache.openai : _modelCache.anthropic;
+    const fbModels = [..._modelCache.openai, ..._modelCache.anthropic];
+    return `<tr class="routing-row" id="row-${r.task_kind}">
+      <td>
+        <div class="task-label">${label}</div>
+        <div class="task-code">${r.task_kind}</div>
+      </td>
+      <td><span class="badge bg-secondary" style="font-size:.72rem">${r.tier}</span></td>
+      <td>
+        <div class="d-flex gap-1">
+          <button type="button" class="provider-btn ${isOAI?'active-openai':''}" onclick="_setProvider('${r.task_kind}','openai')" id="r-btn-openai-${r.task_kind}">OpenAI</button>
+          <button type="button" class="provider-btn ${!isOAI?'active-anthropic':''}" onclick="_setProvider('${r.task_kind}','anthropic')" id="r-btn-anthropic-${r.task_kind}">Anthropic</button>
+        </div>
+        <input type="hidden" id="r-prov-${r.task_kind}" value="${r.provider_id}">
+      </td>
+      <td>${_buildModelSelect('r-model-'+r.task_kind, models, r.model_id)}</td>
+      <td><input class="form-control form-control-sm" type="number" id="r-tok-${r.task_kind}" value="${r.max_tokens}" style="width:80px" ${isEmbed?'disabled':''}></td>
+      <td><input class="form-control form-control-sm" type="number" step="0.1" min="0" max="2" id="r-temp-${r.task_kind}" value="${r.temperature}" style="width:65px" ${isEmbed?'disabled':''}></td>
+      <td>${isEmbed
+        ? '<span style="color:var(--text-muted);font-size:.8rem">—</span>'
+        : _buildModelSelect('r-fb-'+r.task_kind, fbModels, fb)
+      }</td>
+      <td><button class="btn btn-save" onclick="saveRouting('${r.task_kind}')"><i class="bi bi-check2"></i> Сохранить</button></td>
+    </tr>`;
+  }).join('');
+}
+
+async function _setProvider(kind, provider) {
+  document.getElementById('r-prov-' + kind).value = provider;
+  document.getElementById('r-btn-openai-' + kind).className = 'provider-btn' + (provider==='openai'?' active-openai':'');
+  document.getElementById('r-btn-anthropic-' + kind).className = 'provider-btn' + (provider==='anthropic'?' active-anthropic':'');
+  // Reload model dropdown for this row
+  const models = await _loadModels(provider);
+  const currentModel = document.getElementById('r-model-' + kind)?.value || '';
+  const cell = document.getElementById('r-model-' + kind)?.parentElement;
+  if (cell) cell.innerHTML = _buildModelSelect('r-model-' + kind, models, currentModel);
+}
+
+async function loadLLMKeys() {
+  const keys = await apiGet('/admin/llm-keys');
+  if (!keys) return;
+  const providers = [
+    {id:'openai', label:'OpenAI', placeholder:'sk-...', color:'#10a37f'},
+    {id:'anthropic', label:'Anthropic', placeholder:'sk-ant-...', color:'#d97706'},
+  ];
+  document.getElementById('api-keys-row').innerHTML = providers.map(p => `
+    <div class="col-md-6">
+      <div class="card p-3" style="border-color:#2d3748">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <span style="font-size:.8rem;font-weight:600;color:${p.color}">${p.label}</span>
+          <span id="key-status-${p.id}" style="font-size:.75rem;color:${keys[p.id]?'#4ade80':'#f87171'}">${keys[p.id]?'● Ключ задан':'● Не задан'}</span>
+        </div>
+        ${keys[p.id]?`<div style="font-size:.78rem;color:#8b949e;font-family:monospace;margin-bottom:.5rem">${keys[p.id]}</div>`:''}
+        <div class="input-group input-group-sm">
+          <input type="password" class="form-control" id="key-input-${p.id}" placeholder="${p.placeholder}" autocomplete="new-password">
+          <button class="btn btn-outline-secondary" onclick="saveLLMKey('${p.id}')">Сохранить</button>
+        </div>
+      </div>
+    </div>`).join('');
+}
+
+async function saveLLMKey(provider) {
+  const key = document.getElementById('key-input-' + provider).value.trim();
+  if (!key) { toast('Введи ключ', false); return; }
+  try {
+    await fetch('/admin/llm-keys/' + provider, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json','X-Admin-Token': TOKEN},
+      body: JSON.stringify({key})
+    });
+    toast('Ключ сохранён для ' + provider);
+    document.getElementById('key-input-' + provider).value = '';
+    loadLLMKeys();
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+async function saveRouting(kind) {
+  try {
+    const fbModelId = document.getElementById('r-fb-' + kind)?.value?.trim() || '';
+    const fallback_chain = fbModelId
+      ? [{ provider_id: fbModelId.startsWith('claude') ? 'anthropic' : 'openai', model_id: fbModelId }]
+      : [];
+    await apiPut('/admin/routing/' + kind, {
+      provider_id: document.getElementById('r-prov-' + kind).value,
+      model_id: document.getElementById('r-model-' + kind).value,
+      max_tokens: +(document.getElementById('r-tok-' + kind)?.value || 1000),
+      temperature: +(document.getElementById('r-temp-' + kind)?.value || 0.7),
+      fallback_chain,
+    });
+    toast('✓ Сохранено: ' + kind);
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+// ── Quota ─────────────────────────────────────────────────────────────────────
+async function loadQuota() {
+  const items = await apiGet('/admin/quota');
+  if (!items) return;
+  document.getElementById('quota-list').innerHTML = items.map(q => `
+    <div class="col-md-6">
+      <div class="card">
+        <div class="card-header p-3"><span class="badge ${q.tier==='free'?'bg-secondary':'bg-primary'} me-2">${q.tier}</span>тариф</div>
+        <div class="card-body">
+          <div class="mb-2">
+            <label class="form-label" style="font-size:.8rem;color:#8b949e">СООБЩЕНИЙ В ДЕНЬ</label>
+            <input type="number" class="form-control" id="q-msg-${q.tier}" value="${q.daily_messages}">
+          </div>
+          <div class="mb-2">
+            <label class="form-label" style="font-size:.8rem;color:#8b949e">ТАРО В ДЕНЬ</label>
+            <input type="number" class="form-control" id="q-tarot-${q.tier}" value="${q.tarot_per_day}">
+          </div>
+          <div class="mb-3">
+            <label class="form-label" style="font-size:.8rem;color:#8b949e">АСТРОЛОГИЯ В ДЕНЬ</label>
+            <input type="number" class="form-control" id="q-astro-${q.tier}" value="${q.astrology_per_day}">
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveQuota('${q.tier}')">
+            <i class="bi bi-save"></i> Сохранить
+          </button>
+        </div>
+      </div>
+    </div>`).join('');
+}
+async function saveQuota(tier) {
+  try {
+    await apiPut('/admin/quota/' + tier, {
+      daily_messages: +document.getElementById('q-msg-' + tier).value,
+      tarot_per_day: +document.getElementById('q-tarot-' + tier).value,
+      astrology_per_day: +document.getElementById('q-astro-' + tier).value,
+    });
+    toast('Квоты обновлены: ' + tier);
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+// ── Users ─────────────────────────────────────────────────────────────────────
+async function loadUsers() {
+  const items = await apiGet('/admin/users?limit=50');
+  if (!items) return;
+  document.getElementById('users-tbody').innerHTML = (items||[]).map(userRow).join('');
+}
+function userRow(u) {
+  const tgBadge = u.is_premium
+    ? '<span title="Telegram Premium" style="color:#f59e0b;font-size:.85rem"><i class="bi bi-star-fill"></i></span>'
+    : '<span style="color:#374151;font-size:.8rem"><i class="bi bi-telegram"></i></span>';
+  return `<tr>
+    <td><code style="font-size:.75rem;color:#8b949e">${u.user_id.slice(0,8)}…</code></td>
+    <td style="font-size:.85rem">${u.full_name || '<span class="text-secondary">—</span>'}</td>
+    <td style="font-size:.82rem;color:#7dd3fc">${u.tg_username ? '@'+u.tg_username : '<span class="text-secondary">—</span>'}</td>
+    <td>${tgBadge}</td>
+    <td><span class="badge ${u.tier==='free'?'bg-secondary':'bg-primary'}">${u.tier}</span></td>
+    <td>${u.daily_ritual_enabled
+      ? '<span class="text-success"><i class="bi bi-check-circle"></i></span>'
+      : '<span class="text-danger"><i class="bi bi-x-circle"></i></span>'}</td>
+    <td style="font-size:.8rem;color:#8b949e">${u.created_at.slice(0,10)}</td>
+  </tr>`;
+}
+
+function escHtml(t) { return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── KB ────────────────────────────────────────────────────────────────────────
+const KB_LABELS = {knowledge_tarot:'Таро',knowledge_astro:'Астрология',knowledge_psych:'Психология/НЛП'};
+
+function kbTab(name) {
+  ['text','url','file','dataset'].forEach(t => {
+    document.getElementById('kb-pane-' + t).style.display = t === name ? '' : 'none';
+    const tab = document.getElementById('kb-tab-' + t);
+    tab.classList.toggle('active', t === name);
+    tab.style.color = t === name ? '#e0e0e0' : '#8b949e';
+  });
+}
+
+function _fillCollectionSelects(names) {
+  const IDS = ['kb-col','kb-url-col','kb-file-col','kb-ds-col','kb-browse-col'];
+  IDS.forEach(id => {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join('');
+    if (names.includes(prev)) sel.value = prev;
+  });
+}
+
+const _KB_STATUS_STYLE = {
+  green:   {dot:'#4ade80', label:'OK'},
+  yellow:  {dot:'#fbbf24', label:'Индексируется'},
+  red:     {dot:'#f87171', label:'Ошибка'},
+  unknown: {dot:'#6b7280', label:'—'},
+};
+
+async function loadKB() {
+  const cols = await apiGet('/admin/kb/collections');
+  if (!cols) return;
+  _fillCollectionSelects(cols.map(c => c.name));
+  const SYSTEM = ['user_episodes','user_facts'];
+  const totalPoints = cols.reduce((s, c) => s + (c.count || 0), 0);
+
+  document.getElementById('kb-collections-list').innerHTML =
+    `<div style="font-size:.78rem;color:#8b949e;margin-bottom:.75rem">
+      Коллекций: <strong style="color:#e6edf3">${cols.length}</strong>
+      &nbsp;·&nbsp; Всего записей: <strong style="color:#e6edf3">${totalPoints.toLocaleString()}</strong>
+    </div>` +
+    '<div class="table-responsive"><table class="table table-hover mb-0" style="font-size:.84rem">' +
+    '<thead><tr>' +
+    '<th>Коллекция</th>' +
+    '<th style="width:90px">Записей</th>' +
+    '<th style="width:90px">Сегментов</th>' +
+    '<th style="width:90px">Статус</th>' +
+    '<th style="width:210px">Действия</th>' +
+    '</tr></thead><tbody>' +
+    cols.map(c => {
+      const st = _KB_STATUS_STYLE[c.status] || _KB_STATUS_STYLE.unknown;
+      return `<tr>
+        <td style="color:#e8eaed;font-weight:500">
+          ${c.name}
+          ${SYSTEM.includes(c.name)?'<span style="font-size:.7rem;color:#f87171;margin-left:6px">system</span>':''}
+        </td>
+        <td><strong>${c.count.toLocaleString()}</strong></td>
+        <td style="color:#8b949e">${c.segments ?? '—'}</td>
+        <td><span style="display:inline-flex;align-items:center;gap:5px;font-size:.78rem">
+          <span style="width:8px;height:8px;border-radius:50%;background:${st.dot};flex-shrink:0"></span>
+          <span style="color:${st.dot}">${st.label}</span>
+        </span></td>
+        <td>
+          ${!SYSTEM.includes(c.name)?`
+          <button class="btn btn-sm btn-outline-secondary me-1" style="font-size:.75rem" onclick="clearCollection('${c.name}')"><i class="bi bi-trash"></i> Очистить</button>
+          <button class="btn btn-sm" style="font-size:.75rem;background:#4c0519;border-color:#be123c;color:#fca5a5" onclick="dropCollection('${c.name}')"><i class="bi bi-x-circle"></i> Удалить</button>
+          ` : '<span style="color:#555;font-size:.75rem">нельзя удалять</span>'}
+        </td>
+      </tr>`;
+    }).join('') +
+    '</tbody></table></div>';
+  // Entries are loaded on demand via the select+button, not auto-loaded
+}
+
+async function loadKBEntries() {
+  const col = document.getElementById('kb-browse-col').value;
+  const entries = await apiGet('/admin/kb/entries/' + col);
+  const tbody = document.getElementById('kb-entries-tbody');
+  if (!entries || entries.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3" class="text-center text-secondary py-4">Нет записей</td></tr>';
+    return;
+  }
+  tbody.innerHTML = entries.map(e => `<tr>
+    <td><strong style="font-size:.85rem">${escHtml(e.topic)}</strong></td>
+    <td style="font-size:.8rem;color:#8b949e">${escHtml(e.text_preview)}${e.text_preview.length>=200?'…':''}</td>
+    <td><button class="btn btn-outline-danger btn-sm" onclick="deleteKBEntry('${col}','${e.point_id}')"><i class="bi bi-trash"></i></button></td>
+  </tr>`).join('');
+}
+
+async function addKBEntry() {
+  const col = document.getElementById('kb-col').value;
+  const topic = document.getElementById('kb-topic').value.trim();
+  const text = document.getElementById('kb-text').value.trim();
+  if (!topic || !text) { toast('Заполни тему и текст', false); return; }
+  const btn = document.getElementById('kb-add-btn');
+  btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Встраиваем...';
+  try {
+    await apiPost('/admin/kb/add', {collection: col, topic, text});
+    toast('Добавлено: ' + topic);
+    document.getElementById('kb-topic').value = '';
+    document.getElementById('kb-text').value = '';
+    refreshSection('kb');
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+  finally { btn.disabled = false; btn.innerHTML = '<i class="bi bi-cloud-upload"></i> Добавить'; }
+}
+
+async function addKBUrl() {
+  const col = document.getElementById('kb-url-col').value;
+  const url = document.getElementById('kb-url-input').value.trim();
+  const topic = document.getElementById('kb-url-topic').value.trim();
+  const source_lang = document.getElementById('kb-url-lang').value;
+  if (!url) { toast('Введи URL', false); return; }
+  const btn = document.getElementById('kb-url-btn');
+  const res = document.getElementById('kb-url-result');
+  btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Загружаем...';
+  res.textContent = '';
+  try {
+    const data = await apiPost('/admin/kb/ingest-url', {collection: col, url, topic, source_lang});
+    toast(`Добавлено ${data.chunks_added} чанков из URL`);
+    res.textContent = `✓ ${data.chunks_added} фрагментов добавлено`;
+    res.style.color = '#4ade80';
+    document.getElementById('kb-url-input').value = '';
+    document.getElementById('kb-url-topic').value = '';
+    refreshSection('kb');
+  } catch(e) { toast('Ошибка: ' + e.message, false); res.textContent = ''; }
+  finally { btn.disabled = false; btn.innerHTML = '<i class="bi bi-cloud-download"></i> Загрузить и добавить'; }
+}
+
+async function addKBFile() {
+  const col = document.getElementById('kb-file-col').value;
+  const topic = document.getElementById('kb-file-topic').value.trim();
+  const source_lang = document.getElementById('kb-file-lang').value;
+  const fileInput = document.getElementById('kb-file-input');
+  if (!fileInput.files.length) { toast('Выбери файл', false); return; }
+  const btn = document.getElementById('kb-file-btn');
+  const res = document.getElementById('kb-file-result');
+  btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Обрабатываем...';
+  res.textContent = 'Читаем файл...';
+  try {
+    const formData = new FormData();
+    formData.append('collection', col);
+    formData.append('topic', topic);
+    formData.append('source_lang', source_lang);
+    formData.append('file', fileInput.files[0]);
+    const r = await fetch(API + '/admin/kb/ingest-file', {
+      method: 'POST',
+      headers: {'X-Admin-Token': TOKEN},
+      body: formData,
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    toast(`Добавлено ${data.chunks_added} чанков из файла`);
+    res.textContent = `✓ ${data.chunks_added} фрагментов добавлено`;
+    res.style.color = '#4ade80';
+    fileInput.value = '';
+    document.getElementById('kb-file-topic').value = '';
+    refreshSection('kb');
+  } catch(e) { toast('Ошибка: ' + e.message, false); res.textContent = ''; }
+  finally { btn.disabled = false; btn.innerHTML = '<i class="bi bi-upload"></i> Загрузить файл'; }
+}
+
+async function deleteKBEntry(col, id) {
+  if (!confirm('Удалить запись?')) return;
+  try {
+    await apiDelete('/admin/kb/entry/' + col + '/' + id);
+    toast('Удалено');
+    loadKBEntries();
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+// ── Collection management ─────────────────────────────────────────────────────
+async function createCollection() {
+  const name = document.getElementById('new-col-name').value.trim();
+  if (!name) { toast('Введи имя коллекции', false); return; }
+  try {
+    const r = await apiPost('/admin/kb/collections', {name});
+    toast('Коллекция ' + r.created + ' создана');
+    document.getElementById('new-col-name').value = '';
+    document.getElementById('kb-new-col-form').style.display = 'none';
+    refreshSection('kb');
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+async function clearCollection(name) {
+  if (!confirm('Очистить все записи в «' + name + '»? Это нельзя отменить.')) return;
+  try {
+    await apiDelete('/admin/kb/collections/' + name + '?confirm=yes');
+    toast('Коллекция ' + name + ' очищена');
+    refreshSection('kb');
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+async function dropCollection(name) {
+  if (!confirm('УДАЛИТЬ коллекцию «' + name + '» полностью? Все данные будут потеряны!')) return;
+  if (!confirm('Подтверди ещё раз: удалить «' + name + '»?')) return;
+  try {
+    await apiDelete('/admin/kb/collections/' + name + '?confirm=drop');
+    toast('Коллекция ' + name + ' удалена');
+    refreshSection('kb');
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+
+async function addKBDataset() {
+  const url = document.getElementById('kb-ds-url').value.trim();
+  const col = document.getElementById('kb-ds-col').value;
+  const prefix = document.getElementById('kb-ds-prefix').value.trim();
+  const qfield = document.getElementById('kb-ds-qfield').value.trim();
+  const afield = document.getElementById('kb-ds-afield').value.trim();
+  const limit = parseInt(document.getElementById('kb-ds-limit').value) || 0;
+  const source_lang = document.getElementById('kb-ds-lang').value;
+  if (!url) { toast('Введи URL датасета', false); return; }
+
+  const btn = document.getElementById('kb-ds-btn');
+  const res = document.getElementById('kb-ds-result');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Загружаем и встраиваем...';
+  res.textContent = 'Скачиваем → встраиваем оригинал + перевод (займёт несколько минут)...';
+  res.style.color = '#8b949e';
+  try {
+    const data = await apiPost('/admin/kb/ingest-dataset', {
+      collection: col,
+      dataset_url: url,
+      question_field: qfield,
+      answer_field: afield,
+      topic_prefix: prefix,
+      source_lang,
+      limit,
+    });
+    toast(`Добавлено ${data.chunks_added} записей из датасета`);
+    res.textContent = `✓ ${data.chunks_added} записей добавлено`;
+    res.style.color = '#4ade80';
+    document.getElementById('kb-ds-url').value = '';
+    refreshSection('kb');
+  } catch(e) {
+    toast('Ошибка: ' + e.message, false);
+    res.textContent = 'Ошибка — см. детали в toast';
+    res.style.color = '#f87171';
+  }
+  finally { btn.disabled = false; btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Импортировать датасет'; }
+}
+
+// ── HuggingFace catalog search ────────────────────────────────────────────────
+async function searchHF() {
+  const q = document.getElementById('hf-search-q').value.trim();
+  if (!q) { toast('Введи запрос для поиска', false); return; }
+  await _renderHFResults(await apiGet('/admin/kb/hf-search?q=' + encodeURIComponent(q) + '&limit=20'));
+}
+
+async function searchHFTag(tag) {
+  document.getElementById('hf-search-q').value = '';
+  await _renderHFResults(await apiGet('/admin/kb/hf-search?tag=' + encodeURIComponent(tag) + '&limit=20'));
+}
+
+async function searchHFQ(q) {
+  document.getElementById('hf-search-q').value = q;
+  await _renderHFResults(await apiGet('/admin/kb/hf-search?q=' + encodeURIComponent(q) + '&limit=20'));
+}
+
+async function _renderHFResults(results) {
+  const el = document.getElementById('hf-results');
+  if (!results || !results.length) { el.innerHTML = '<div style="color:#8b949e;font-size:.85rem">Ничего не найдено</div>'; return; }
+  el.innerHTML = '<div class="row g-2">' + results.map(d => `
+    <div class="col-md-6">
+      <div class="card p-2" style="cursor:pointer;border-color:#2d4a6e" onclick="importHFDataset('${d.id}')">
+        <div class="d-flex justify-content-between align-items-start">
+          <div style="font-size:.85rem;font-weight:600;color:#e8eaed">${d.id}</div>
+          <div style="font-size:.72rem;color:#b0bec5;white-space:nowrap;margin-left:8px">⬇ ${(d.downloads||0).toLocaleString()}</div>
+        </div>
+        <div style="font-size:.72rem;margin-top:3px">${d.tags.map(t=>`<span style="background:#21262d;color:#a78bfa;border:1px solid #333;border-radius:10px;padding:1px 6px;margin-right:3px">${t}</span>`).join('')}</div>
+        <div style="font-size:.75rem;color:#4ade80;margin-top:4px">▶ Импортировать</div>
+      </div>
+    </div>
+  `).join('') + '</div>';
+}
+
+function importHFDataset(repoId) {
+  // Switch to Datasets tab and fill in the HF URL
+  kbTab('dataset');
+  const url = 'https://huggingface.co/datasets/' + repoId;
+  document.getElementById('kb-ds-url').value = url;
+  document.getElementById('kb-ds-col').value = 'knowledge_psych';
+  document.getElementById('kb-ds-prefix').value = repoId.split('/').pop();
+  document.getElementById('kb-ds-translate').checked = true;
+  toast('Датасет выбран: ' + repoId + '. Настрой параметры и нажми «Импортировать».');
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+if (TOKEN) {
+  apiGet('/admin/stats').then(r => { if(r) showApp(); });
+}
+</script>
+</body>
+</html>"""
+
+
+@ui_router.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def admin_ui():
+    return HTMLResponse(_HTML)

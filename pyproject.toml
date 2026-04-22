@@ -41,6 +41,12 @@ celery = { extras = ["rabbitmq"], version = "^5.4" }
 # Utils
 geopy = "^2.4"
 pytz = "^2024.1"
+httpx = "^0.28"
+pypdf = "^5.1"
+python-docx = "^1.1"
+beautifulsoup4 = "^4.12"
+lxml = "^5.3"
+python-multipart = "^0.0.20"
 
 # Messaging
 nats-py = "^2.9"
@@ -56,11 +62,11 @@ prometheus-fastapi-instrumentator = "^7.0"
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"
 pytest-asyncio = "^0.24"
-httpx = "^0.28"
 pytest-mock = "^3.14"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
 

@@ -12,6 +12,7 @@ QDRANT_COLLECTIONS = {
     "user_facts":      {"size": 3072, "distance": Distance.COSINE},
     "knowledge_astro": {"size": 3072, "distance": Distance.COSINE},
     "knowledge_tarot": {"size": 3072, "distance": Distance.COSINE},
+    "knowledge_psych": {"size": 3072, "distance": Distance.COSINE},
 }
 
 
