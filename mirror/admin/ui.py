@@ -929,6 +929,7 @@ async function loadKB() {
     }).join('') +
     '</tbody></table></div>';
   // Entries are loaded on demand via the select+button, not auto-loaded
+  loadIngestJobs();
 }
 
 async function loadKBEntries() {
