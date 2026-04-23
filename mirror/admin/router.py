@@ -3,6 +3,7 @@ import csv as csv_mod
 import os
 import io
 import json
+import time
 import uuid as uuid_module
 import zipfile
 from typing import Optional
@@ -480,6 +481,8 @@ async def kb_create_collection(body: KBCreateCollectionRequest):
     name = body.name.strip().lower()
     if not re.match(r"^[a-z][a-z0-9_]{2,49}$", name):
         raise HTTPException(400, "Имя коллекции: только латиница, цифры, _, длина 3–50 символов")
+    if name in _SYSTEM_COLLECTIONS:
+        raise HTTPException(400, f"Имя {name!r} зарезервировано системой")
 
     from qdrant_client.models import Distance, VectorParams
     client = AsyncQdrantClient(url=settings.qdrant_url)
@@ -655,7 +658,7 @@ async def kb_ingest_url(body: KBIngestURLRequest, request: Request):
     return KBIngestResult(chunks_added=count, collection=body.collection, source=body.url)
 
 
-@router.post("/kb/ingest-file", response_model=KBIngestResult, dependencies=[Depends(_verify_token)])
+@router.post("/kb/ingest-file", dependencies=[Depends(_verify_token)])
 async def kb_ingest_file(
     request: Request,
     collection: str = Form(...),
@@ -663,27 +666,228 @@ async def kb_ingest_file(
     source_lang: str = Form("auto"),
     file: UploadFile = File(...),
 ):
-    llm_router = getattr(request.app.state, "llm_router", None)
-    if llm_router is None:
-        raise HTTPException(status_code=503, detail="LLM router not ready")
+    queue = getattr(request.app.state, "ingest_queue", None)
+    if queue is None:
+        raise HTTPException(status_code=503, detail="Очередь загрузок не инициализирована")
 
     content = await file.read()
     filename = file.filename or "upload"
     mime = file.content_type or ""
-
     file_topic = topic or filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
 
-    if filename.lower().endswith(".zip"):
-        chunks_total = await _ingest_zip(content, collection, file_topic, llm_router, source_lang)
-    else:
-        text_content = _extract_text_from_bytes(content, filename=filename, mime=mime)
-        if not text_content.strip():
-            raise HTTPException(status_code=400, detail="Не удалось извлечь текст из файла")
-        chunks = _chunk_text(text_content)
-        chunks_total = await _upsert_bilingual_chunks(chunks, collection, file_topic, llm_router, source_lang)
+    job_id = str(uuid_module.uuid4())
+    async with db_module.async_session_factory() as session:
+        await session.execute(
+            text(
+                "INSERT INTO ingest_jobs (id, status, filename, collection, file_data, file_mime, file_topic, source_lang) "
+                "VALUES (:id, 'queued', :fn, :col, :fd, :fm, :ft, :sl)"
+            ),
+            {"id": job_id, "fn": filename, "col": collection,
+             "fd": content, "fm": mime, "ft": file_topic, "sl": source_lang},
+        )
+        await session.commit()
 
-    logger.info("admin.kb.ingest_file", collection=collection, filename=filename, chunks=chunks_total)
-    return KBIngestResult(chunks_added=chunks_total, collection=collection, source=filename)
+    await queue.put(job_id)
+    logger.info("admin.kb.ingest_job_queued", job_id=job_id, filename=filename, collection=collection)
+    return {"job_id": job_id, "status": "queued", "filename": filename, "collection": collection}
+
+
+async def _ingest_worker(queue: asyncio.Queue, llm_router) -> None:
+    """Pull job IDs from queue and process them one at a time (3 workers run concurrently).
+
+    Catches all unexpected exceptions so the worker loop never dies silently.
+    """
+    while True:
+        job_id: str | None = None
+        try:
+            job_id = await queue.get()
+        except asyncio.CancelledError:
+            return
+
+        try:
+            # Auto-detect OpenAI tier and calibrate concurrency (once per hour)
+            await _maybe_refresh_translate_sem()
+
+            async with db_module.async_session_factory() as session:
+                row = (await session.execute(
+                    text("SELECT filename, collection, file_data, file_mime, file_topic, source_lang "
+                         "FROM ingest_jobs WHERE id=:id AND status='queued'"),
+                    {"id": job_id},
+                )).fetchone()
+
+            if not row:
+                # Job was cancelled before we picked it up
+                queue.task_done()
+                continue
+
+            async with db_module.async_session_factory() as session:
+                await session.execute(
+                    text("UPDATE ingest_jobs SET status='running', updated_at=now() WHERE id=:id"),
+                    {"id": job_id},
+                )
+                await session.commit()
+
+            await _run_ingest_job(
+                job_id, row.file_data, row.filename, row.file_mime,
+                row.collection, row.file_topic, llm_router, row.source_lang,
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.error("ingest_worker.unexpected_error", job_id=job_id, error=str(exc))
+            if job_id:
+                try:
+                    async with db_module.async_session_factory() as s:
+                        await s.execute(
+                            text("UPDATE ingest_jobs SET status='error', "
+                                 "error='Внутренняя ошибка воркера', updated_at=now() "
+                                 "WHERE id=:id AND status='running'"),
+                            {"id": job_id},
+                        )
+                        await s.commit()
+                except Exception:
+                    pass
+        finally:
+            try:
+                queue.task_done()
+            except ValueError:
+                pass
+
+
+async def _run_ingest_job(
+    job_id: str, content: bytes, filename: str, mime: str,
+    collection: str, file_topic: str, llm_router, source_lang: str,
+) -> None:
+    async def _progress(n: int) -> None:
+        try:
+            async with db_module.async_session_factory() as s:
+                await s.execute(
+                    text("UPDATE ingest_jobs SET chunks_done = chunks_done + :n, updated_at=now() WHERE id=:id"),
+                    {"n": n, "id": job_id},
+                )
+                await s.commit()
+        except Exception:
+            pass
+
+    try:
+        if filename.lower().endswith(".zip"):
+            chunks_total = await _ingest_zip(
+                content, collection, file_topic, llm_router, source_lang, progress_cb=_progress
+            )
+        else:
+            text_content = _extract_text_from_bytes(content, filename=filename, mime=mime)
+            if not text_content.strip():
+                raise ValueError("Не удалось извлечь текст из файла")
+            chunks = _chunk_text(text_content)
+            # Store total upfront so UI can show X / N progress
+            try:
+                async with db_module.async_session_factory() as s:
+                    await s.execute(
+                        text("UPDATE ingest_jobs SET chunks_total=:n WHERE id=:id"),
+                        {"n": len(chunks), "id": job_id},
+                    )
+                    await s.commit()
+            except Exception:
+                pass
+            # progress_cb called every _PROCESS_BATCH chunks inside _upsert_bilingual_chunks
+            chunks_total = await _upsert_bilingual_chunks(
+                chunks, collection, file_topic, llm_router, source_lang, progress_cb=_progress
+            )
+
+        async with db_module.async_session_factory() as session:
+            await session.execute(
+                text("UPDATE ingest_jobs SET status='done', chunks_added=:n, updated_at=now() WHERE id=:id"),
+                {"n": chunks_total, "id": job_id},
+            )
+            await session.commit()
+        logger.info("admin.kb.ingest_job_done", job_id=job_id, chunks=chunks_total)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        error_msg = getattr(exc, "detail", None) or str(exc)
+        async with db_module.async_session_factory() as session:
+            await session.execute(
+                text("UPDATE ingest_jobs SET status='error', error=:e, updated_at=now() WHERE id=:id"),
+                {"e": str(error_msg)[:500], "id": job_id},
+            )
+            await session.commit()
+        logger.error("admin.kb.ingest_job_error", job_id=job_id, error=str(error_msg))
+
+
+@router.post("/kb/jobs/{job_id}/cancel", dependencies=[Depends(_verify_token)])
+async def cancel_ingest_job(job_id: str):
+    async with db_module.async_session_factory() as session:
+        result = await session.execute(
+            text("UPDATE ingest_jobs SET status='error', error='Отменено пользователем', "
+                 "updated_at=now() WHERE id=:id AND status IN ('running', 'queued') RETURNING id"),
+            {"id": job_id},
+        )
+        if not result.fetchone():
+            raise HTTPException(status_code=404, detail="Задача не найдена или уже завершена")
+        await session.commit()
+    return {"ok": True}
+
+
+@router.delete("/kb/jobs/{job_id}", dependencies=[Depends(_verify_token)])
+async def delete_ingest_job(job_id: str):
+    async with db_module.async_session_factory() as session:
+        result = await session.execute(
+            text("DELETE FROM ingest_jobs WHERE id=:id AND status != 'running' RETURNING id"),
+            {"id": job_id},
+        )
+        if not result.fetchone():
+            raise HTTPException(status_code=404, detail="Задача не найдена или ещё выполняется")
+        await session.commit()
+    return {"ok": True}
+
+
+@router.post("/kb/jobs/{job_id}/retry", dependencies=[Depends(_verify_token)])
+async def retry_ingest_job(job_id: str, request: Request):
+    queue = getattr(request.app.state, "ingest_queue", None)
+    if queue is None:
+        raise HTTPException(503, "Очередь загрузок не инициализирована")
+    async with db_module.async_session_factory() as session:
+        row = (await session.execute(
+            text("SELECT file_data FROM ingest_jobs WHERE id=:id AND status IN ('error', 'done')"),
+            {"id": job_id},
+        )).fetchone()
+        if not row:
+            raise HTTPException(404, "Задача не найдена или ещё выполняется")
+        if not row.file_data:
+            raise HTTPException(400, "Нет сохранённых данных файла для повтора")
+        await session.execute(
+            text("UPDATE ingest_jobs SET status='queued', error=NULL, chunks_done=0, "
+                 "updated_at=now() WHERE id=:id"),
+            {"id": job_id},
+        )
+        await session.commit()
+    await queue.put(job_id)
+    return {"ok": True, "status": "queued"}
+
+
+@router.get("/kb/jobs", dependencies=[Depends(_verify_token)])
+async def get_ingest_jobs():
+    async with db_module.async_session_factory() as session:
+        rows = (await session.execute(
+            text(
+                "SELECT id, status, filename, collection, chunks_added, error, "
+                "created_at, updated_at, chunks_done, chunks_total "
+                "FROM ingest_jobs "
+                "WHERE status != 'done' OR updated_at > now() - interval '10 minutes' "
+                "ORDER BY created_at DESC LIMIT 50"
+            )
+        )).fetchall()
+    return [
+        {
+            "id": r[0], "status": r[1], "filename": r[2], "collection": r[3],
+            "chunks_added": r[4], "error": r[5],
+            "created_at": r[6].isoformat() if r[6] else "",
+            "updated_at": r[7].isoformat() if r[7] else "",
+            "chunks_done": r[8] or 0,
+            "chunks_total": r[9] or 0,
+        }
+        for r in rows
+    ]
 
 
 # ── text extraction helpers ───────────────────────────────────────────────────
@@ -696,6 +900,8 @@ def _extract_text_from_bytes(data: bytes, filename: str, mime: str = "") -> str:
         return _extract_docx(data)
     if fname.endswith(".epub") or "epub" in mime:
         return _extract_epub(data)
+    if fname.endswith(".fb2") or "fb2" in mime:
+        return _extract_fb2(data)
     if fname.endswith((".html", ".htm")) or "html" in mime:
         return _extract_html(data)
     if fname.endswith((".txt", ".md", ".rst", ".csv", ".tsv", ".log")):
@@ -777,6 +983,22 @@ def _extract_epub(data: bytes) -> str:
         raise HTTPException(status_code=400, detail=f"Ошибка EPUB: {e}")
 
 
+def _extract_fb2(data: bytes) -> str:
+    """Extract text from FB2 (FictionBook2): XML with <body><section><p> structure."""
+    try:
+        from bs4 import BeautifulSoup
+        text = _safe_decode(data)
+        soup = BeautifulSoup(text, "xml")
+        parts = []
+        for body in soup.find_all("body"):
+            for tag in body.find_all(["binary", "image"]):
+                tag.decompose()
+            parts.append(body.get_text(separator="\n", strip=True))
+        return "\n\n".join(p for p in parts if p)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка FB2: {e}")
+
+
 def _extract_html(data: bytes) -> str:
     try:
         from bs4 import BeautifulSoup
@@ -843,43 +1065,57 @@ def _url_to_topic(url: str) -> str:
     return path.replace("-", " ").replace("_", " ")[:80]
 
 
-_EMBED_CONCURRENCY = 12   # parallel embed calls
-_UPSERT_BATCH = 100       # points per Qdrant batch upsert
+_UPSERT_BATCH = 200          # Qdrant points per upsert call
+_TRANSLATE_BATCH = 30        # chunks per single LLM translation call
+_PROCESS_BATCH = 300         # chunks per progress-update cycle
+_ZIP_FILE_CONCURRENCY = 5    # parallel files processed from ZIP
+
+# Global semaphore for concurrent translation calls across ALL workers and jobs.
+# Auto-calibrated from live x-ratelimit-limit-tokens header; re-checked every hour.
+# Formula: TPM / 60s * avg_call_latency_s / tokens_per_batch
+#   tokens_per_batch = _TRANSLATE_BATCH * ~433 tokens/chunk ≈ 13,000
+#   avg_latency ≈ 3s  →  concurrent = TPM * 3 / 780_000
+_GLOBAL_TRANSLATE_SEM: asyncio.Semaphore = asyncio.Semaphore(8)  # conservative default
+_GLOBAL_TRANSLATE_SEM_SIZE: int = 8   # tracks configured limit (avoid accessing ._value)
+_SEM_LAST_CHECKED: float = 0.0
+_SEM_CHECK_INTERVAL: float = 3600.0   # re-probe once per hour
 
 
-async def _upsert_chunks(
-    chunks: list[str], collection: str, topic: str, llm_router
-) -> int:
-    if not chunks:
-        return 0
-    sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
+def _get_translate_sem() -> asyncio.Semaphore:
+    return _GLOBAL_TRANSLATE_SEM
 
-    async def _embed_one(text: str) -> list[float]:
-        async with sem:
-            return await llm_router.embed(text)
 
-    topics = [
-        f"{topic} (часть {i + 1})" if len(chunks) > 1 else topic
-        for i in range(len(chunks))
-    ]
-    texts = [f"{t}\n{c}" for t, c in zip(topics, chunks)]
-    embeddings = await asyncio.gather(*[_embed_one(t) for t in texts])
+async def _maybe_refresh_translate_sem() -> None:
+    """Probe OpenAI for actual TPM limit and rebuild semaphore if tier changed."""
+    global _GLOBAL_TRANSLATE_SEM, _GLOBAL_TRANSLATE_SEM_SIZE, _SEM_LAST_CHECKED
+    now = time.monotonic()
+    if now - _SEM_LAST_CHECKED < _SEM_CHECK_INTERVAL:
+        return
+    _SEM_LAST_CHECKED = now  # set before any await — prevents concurrent probes in same loop tick
 
-    client = AsyncQdrantClient(url=settings.qdrant_url)
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return
     try:
-        points = [
-            PointStruct(
-                id=str(uuid_module.uuid4()),
-                vector=emb,
-                payload={"topic": t, "text": c, "collection": collection},
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
             )
-            for t, c, emb in zip(topics, chunks, embeddings)
-        ]
-        for i in range(0, len(points), _UPSERT_BATCH):
-            await client.upsert(collection_name=collection, points=points[i:i + _UPSERT_BATCH])
-    finally:
-        await client.close()
-    return len(chunks)
+        tpm = int(resp.headers.get("x-ratelimit-limit-tokens", 0))
+        rpm = int(resp.headers.get("x-ratelimit-limit-requests", 0))
+        if tpm > 0:
+            # Stay within TPM: each batch ≈ 13k tokens, ~3s per call
+            concurrent = max(2, min(50, tpm * 3 // 780_000))
+            if _GLOBAL_TRANSLATE_SEM_SIZE != concurrent:
+                _GLOBAL_TRANSLATE_SEM = asyncio.Semaphore(concurrent)
+                _GLOBAL_TRANSLATE_SEM_SIZE = concurrent
+                logger.info("translate_sem.updated", tpm=tpm, rpm=rpm, concurrent=concurrent)
+            else:
+                logger.info("translate_sem.unchanged", tpm=tpm, rpm=rpm, concurrent=concurrent)
+    except Exception:
+        logger.warning("translate_sem.probe_failed")
 
 
 _DATA_EXTENSIONS = {".json", ".jsonl", ".csv", ".txt", ".md"}
@@ -1303,9 +1539,6 @@ def _detect_qa_fields(sample: dict, q_hint: str, a_hint: str) -> tuple[str, str]
     return q, a
 
 
-_TRANSLATE_CONCURRENCY = 4  # translation is expensive; keep lower
-
-
 def _detect_lang(text: str) -> str:
     """Detect language: 'ru' if >20% cyrillic characters, else 'en'."""
     if not text:
@@ -1316,26 +1549,20 @@ def _detect_lang(text: str) -> str:
 
 
 async def _llm_translate_to(text: str, target_lang: str, llm_router) -> str:
-    """Translate text to target_lang ('ru' or 'en'). Returns original if already in target lang."""
+    """Translate a single text. Returns original if already in target lang or on error."""
     if _detect_lang(text) == target_lang:
         return text
-    if target_lang == "ru":
-        system = (
-            "Переведи текст на русский язык. Сохрани структуру и психологические термины. "
-            "Верни ТОЛЬКО перевод без пояснений."
-        )
-    else:
-        system = (
-            "Translate the text to English. Preserve structure and psychological terms. "
-            "Return ONLY the translation without explanations."
-        )
+    system = (
+        "Переведи текст на русский язык. Сохрани структуру и психологические термины. "
+        "Верни ТОЛЬКО перевод без пояснений."
+        if target_lang == "ru" else
+        "Translate the text to English. Preserve structure and psychological terms. "
+        "Return ONLY the translation without explanations."
+    )
     try:
         return await llm_router.call(
             task_kind="intent_classify",
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": text[:3000]},
-            ],
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": text[:3000]}],
             max_tokens=1500,
             temperature=0.1,
         )
@@ -1343,76 +1570,189 @@ async def _llm_translate_to(text: str, target_lang: str, llm_router) -> str:
         return text
 
 
+def _parse_numbered_translations(text: str, expected: int) -> list[str]:
+    """Parse [1]...[N] numbered format from LLM batch-translate response."""
+    import re
+    parts = re.split(r'\n?\[(\d+)\]\s*', text)
+    result: dict[int, str] = {}
+    i = 1
+    while i < len(parts) - 1:
+        try:
+            n = int(parts[i])
+            content = parts[i + 1].strip()
+            if 1 <= n <= expected:
+                result[n] = content
+        except (ValueError, IndexError):
+            pass
+        i += 2
+    return [result.get(i, "") for i in range(1, expected + 1)]
+
+
+async def _batch_translate_texts(texts: list[str], target_lang: str, llm_router) -> list[str]:
+    """Translate texts in parallel batches of _TRANSLATE_BATCH, up to _TRANSLATE_CONCURRENCY concurrent.
+
+    gpt-4o-mini limits (Tier 1): 500 RPM, 200k TPM.
+    Each batch of 30 chunks ≈ 13k tokens I/O → up to 5 parallel = 65k tokens/wave,
+    completing in ~3s → well within 200k TPM.
+    """
+    if not texts:
+        return []
+
+    already = [_detect_lang(t) == target_lang for t in texts]
+    need_indices = [i for i, a in enumerate(already) if not a]
+    if not need_indices:
+        return list(texts)
+
+    system = (
+        "Переведи каждый пронумерованный фрагмент на русский язык. "
+        "Сохрани психологические термины. Формат ответа строго: [N] перевод. Только переводы, без пояснений."
+        if target_lang == "ru" else
+        "Translate each numbered fragment to English. "
+        "Preserve psychological terms. Reply strictly: [N] translation. Only translations."
+    )
+
+    results = list(texts)
+    texts_to_translate = [texts[i] for i in need_indices]
+    batches = [
+        texts_to_translate[s:s + _TRANSLATE_BATCH]
+        for s in range(0, len(texts_to_translate), _TRANSLATE_BATCH)
+    ]
+
+    sem = _get_translate_sem()  # global across all workers/jobs
+
+    async def _translate_one_batch(batch_idx: int, batch: list[str]) -> tuple[int, list[str]]:
+        async with sem:
+            numbered = "\n\n".join(f"[{j + 1}] {t[:2000]}" for j, t in enumerate(batch))
+            # Allow enough tokens for full output: ~350 tokens per chunk
+            max_out = min(15000, len(batch) * 400)
+            parsed: list[str] = []
+            try:
+                response = await llm_router.call(
+                    task_kind="intent_classify",
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": numbered},
+                    ],
+                    max_tokens=max_out,
+                    temperature=0.1,
+                )
+                parsed = _parse_numbered_translations(response, len(batch))
+            except Exception:
+                pass
+
+            non_empty = sum(1 for p in parsed if p)
+            if non_empty >= len(batch) * 0.7:
+                return batch_idx, [p if p else orig for p, orig in zip(parsed, batch)]
+
+            # Fallback: individual calls with limited concurrency
+            ind_sem = asyncio.Semaphore(4)
+            async def _tr_one(t: str) -> str:
+                async with ind_sem:
+                    return await _llm_translate_to(t, target_lang, llm_router)
+            individual = await asyncio.gather(*[_tr_one(t) for t in batch])
+            return batch_idx, list(individual)
+
+    batch_results = await asyncio.gather(*[_translate_one_batch(i, b) for i, b in enumerate(batches)])
+    batch_results = sorted(batch_results, key=lambda x: x[0])
+
+    translated_all: list[str] = []
+    for _, tr_list in batch_results:
+        translated_all.extend(tr_list)
+
+    for rel_i, abs_i in enumerate(need_indices):
+        results[abs_i] = translated_all[rel_i]
+
+    return results
+
+
 async def _upsert_bilingual_chunks(
-    chunks: list[str], collection: str, topic: str, llm_router, source_lang: str = "auto"
+    chunks: list[str], collection: str, topic: str, llm_router,
+    source_lang: str = "auto", progress_cb=None, chunk_offset: int = 0,
 ) -> int:
-    """Upsert chunks in original language + translated version. Returns original chunk count."""
+    """Upsert chunks in original + translated language.
+
+    Pipeline: translation of batch[i+1] runs concurrently with embedding of batch[i].
+    Qdrant upserts run in parallel within each batch.
+    Embedding uses batch_size=500 (text-embedding-3-large: 2048 inputs / 300k tokens per call).
+    """
     if not chunks:
         return 0
 
     sample = " ".join(chunks[:3])
     lang = source_lang if source_lang in ("ru", "en") else _detect_lang(sample)
     target_lang = "en" if lang == "ru" else "ru"
+    n_chunks = len(chunks)
 
-    topics = [
-        f"{topic} (часть {i + 1})" if len(chunks) > 1 else topic
-        for i in range(len(chunks))
-    ]
-
-    # Translate all chunks concurrently
-    sem_tr = asyncio.Semaphore(_TRANSLATE_CONCURRENCY)
-
-    async def _tr(text: str) -> str:
-        async with sem_tr:
-            return await _llm_translate_to(text, target_lang, llm_router)
-
-    translated_chunks = await asyncio.gather(*[_tr(c) for c in chunks])
-
-    # Embed originals + translations concurrently
-    orig_texts = [f"{t}\n{c}" for t, c in zip(topics, chunks)]
-    tr_texts   = [f"{t}\n{c}" for t, c in zip(topics, translated_chunks)]
-
-    sem_emb = asyncio.Semaphore(_EMBED_CONCURRENCY)
-
-    async def _emb(text: str) -> list[float]:
-        async with sem_emb:
-            return await llm_router.embed(text)
-
-    all_embeddings = await asyncio.gather(*[_emb(t) for t in orig_texts + tr_texts])
-    orig_embs = all_embeddings[:len(chunks)]
-    tr_embs   = all_embeddings[len(chunks):]
-
-    orig_points = [
-        PointStruct(
-            id=str(uuid_module.uuid4()),
-            vector=emb,
-            payload={"topic": t, "text": c, "collection": collection, "lang": lang},
-        )
-        for t, c, emb in zip(topics, chunks, orig_embs)
-    ]
-    tr_points = [
-        PointStruct(
-            id=str(uuid_module.uuid4()),
-            vector=emb,
-            payload={"topic": t, "text": c, "collection": collection, "lang": target_lang},
-        )
-        for t, c, emb in zip(topics, translated_chunks, tr_embs)
-    ]
+    sub_batches = [chunks[s:s + _PROCESS_BATCH] for s in range(0, n_chunks, _PROCESS_BATCH)]
 
     client = AsyncQdrantClient(url=settings.qdrant_url)
+    total_added = 0
+    # Defined before try so finally can always cancel it on error
+    pending_tr: asyncio.Task | None = None
     try:
-        all_points = orig_points + tr_points
-        for i in range(0, len(all_points), _UPSERT_BATCH):
-            await client.upsert(collection_name=collection, points=all_points[i:i + _UPSERT_BATCH])
+        # Lookahead: start translating batch 0 before the loop
+        pending_tr = asyncio.create_task(
+            _batch_translate_texts(sub_batches[0], target_lang, llm_router)
+        )
+
+        for i, sub in enumerate(sub_batches):
+            batch_start = i * _PROCESS_BATCH
+            sub_topics = [
+                f"{topic} (часть {chunk_offset + batch_start + j + 1})" if n_chunks > 1 else topic
+                for j in range(len(sub))
+            ]
+
+            # Await translation of current batch (already running)
+            translated = await pending_tr
+            pending_tr = None
+
+            # Immediately kick off translation of NEXT batch (pipeline)
+            if i + 1 < len(sub_batches):
+                pending_tr = asyncio.create_task(
+                    _batch_translate_texts(sub_batches[i + 1], target_lang, llm_router)
+                )
+
+            orig_texts = [f"{t}\n{c}" for t, c in zip(sub_topics, sub)]
+            tr_texts   = [f"{t}\n{c}" for t, c in zip(sub_topics, translated)]
+            # batch_size=500: up to 300k tokens per call, 5x fewer API calls vs default 100
+            all_embs = await llm_router.embed_batch(orig_texts + tr_texts, batch_size=500)
+
+            points = [
+                PointStruct(id=str(uuid_module.uuid4()), vector=emb,
+                            payload={"topic": t, "text": c, "collection": collection, "lang": lang})
+                for t, c, emb in zip(sub_topics, sub, all_embs[:len(sub)])
+            ] + [
+                PointStruct(id=str(uuid_module.uuid4()), vector=emb,
+                            payload={"topic": t, "text": c, "collection": collection, "lang": target_lang})
+                for t, c, emb in zip(sub_topics, translated, all_embs[len(sub):])
+            ]
+
+            # Parallel Qdrant upserts
+            await asyncio.gather(*[
+                client.upsert(collection_name=collection, points=points[s:s + _UPSERT_BATCH])
+                for s in range(0, len(points), _UPSERT_BATCH)
+            ])
+
+            total_added += len(sub)
+            if progress_cb:
+                await progress_cb(len(sub))
     finally:
+        # Cancel any in-flight lookahead translate task to avoid leaking API calls
+        if pending_tr is not None and not pending_tr.done():
+            pending_tr.cancel()
+            try:
+                await pending_tr
+            except (asyncio.CancelledError, Exception):
+                pass
         await client.close()
-    return len(chunks)
+
+    return total_added
 
 
 async def _upsert_bilingual_entries(
     entries: list[dict], collection: str, llm_router, source_lang: str = "auto"
 ) -> int:
-    """Upsert entries in both original and translated form. Returns original entry count."""
+    """Upsert entries in original + translated form. Returns original entry count."""
     if not entries:
         return 0
 
@@ -1422,35 +1762,19 @@ async def _upsert_bilingual_entries(
 
     topics = [e["topic"] for e in entries]
     orig_texts = [e["text"] for e in entries]
+    translated_texts = await _batch_translate_texts(orig_texts, target_lang, llm_router)
 
-    sem_tr = asyncio.Semaphore(_TRANSLATE_CONCURRENCY)
-
-    async def _tr(text: str) -> str:
-        async with sem_tr:
-            return await _llm_translate_to(text, target_lang, llm_router)
-
-    translated_texts = await asyncio.gather(*[_tr(t) for t in orig_texts])
-
-    # Embed both sets concurrently
     all_topics = topics + topics
     all_texts  = orig_texts + translated_texts
     all_langs  = [lang] * len(entries) + [target_lang] * len(entries)
-
-    sem_emb = asyncio.Semaphore(_EMBED_CONCURRENCY)
-
-    async def _emb(topic: str, text: str) -> list[float]:
-        async with sem_emb:
-            return await llm_router.embed(f"{topic}\n{text}")
-
-    all_embeddings = await asyncio.gather(*[_emb(t, tx) for t, tx in zip(all_topics, all_texts)])
+    all_embs = await llm_router.embed_batch(
+        [f"{t}\n{tx}" for t, tx in zip(all_topics, all_texts)], batch_size=500
+    )
 
     all_points = [
-        PointStruct(
-            id=str(uuid_module.uuid4()),
-            vector=emb,
-            payload={"topic": t, "text": tx, "collection": collection, "lang": l},
-        )
-        for t, tx, emb, l in zip(all_topics, all_texts, all_embeddings, all_langs)
+        PointStruct(id=str(uuid_module.uuid4()), vector=emb,
+                    payload={"topic": t, "text": tx, "collection": collection, "lang": l})
+        for t, tx, emb, l in zip(all_topics, all_texts, all_embs, all_langs)
     ]
 
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
@@ -1478,18 +1802,17 @@ async def _ensure_collection(name: str) -> None:
         await client.close()
 
 
-async def _ingest_zip(data: bytes, collection: str, base_topic: str, llm_router, source_lang: str = "auto") -> int:
+async def _ingest_zip(data: bytes, collection: str, base_topic: str, llm_router, source_lang: str = "auto",
+                      progress_cb=None) -> int:
     """Ingest all files from a ZIP archive.
 
-    If the ZIP contains top-level folders whose names start with ``knowledge_``,
-    each folder is treated as a separate collection and files are routed there
-    automatically.  Files at the root level (or inside non-knowledge folders)
-    fall back to the ``collection`` parameter.
+    Files are processed in parallel (_ZIP_FILE_CONCURRENCY at a time).
+    If the ZIP contains top-level folders starting with ``knowledge_``, each folder
+    is routed to its own collection automatically.
     """
-    total = 0
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            # Pre-create any collections referenced by folder names so upserts don't fail.
+            # Pre-create any collection referenced by folder names
             folder_collections = {
                 parts[0]
                 for name in zf.namelist()
@@ -1500,6 +1823,8 @@ async def _ingest_zip(data: bytes, collection: str, base_topic: str, llm_router,
             for col in folder_collections:
                 await _ensure_collection(col)
 
+            # Read all file bytes synchronously (ZipFile is not thread-safe for concurrent reads)
+            files: list[tuple[str, str, bytes, str]] = []  # (collection, topic, raw, filename)
             for name in zf.namelist():
                 if name.endswith("/") or name.startswith("__MACOSX"):
                     continue
@@ -1507,21 +1832,25 @@ async def _ingest_zip(data: bytes, collection: str, base_topic: str, llm_router,
                 filename = parts[-1]
                 if not filename:
                     continue
-
-                # Route to folder-named collection when folder looks like a collection.
-                if len(parts) > 1 and parts[0].startswith("knowledge_"):
-                    target_collection = parts[0]
-                else:
-                    target_collection = collection
-
-                file_bytes = zf.read(name)
-                text_content = _extract_text_from_bytes(file_bytes, filename=filename)
-                if not text_content.strip():
-                    continue
+                target_col = parts[0] if len(parts) > 1 and parts[0].startswith("knowledge_") else collection
                 book_name = filename.rsplit(".", 1)[0]
                 file_topic = f"{base_topic} / {book_name}" if base_topic else book_name
-                chunks = _chunk_text(text_content)
-                total += await _upsert_bilingual_chunks(chunks, target_collection, file_topic, llm_router, source_lang)
+                files.append((target_col, file_topic, zf.read(name), filename))
     except zipfile.BadZipFile as e:
         raise HTTPException(status_code=400, detail=f"Некорректный ZIP: {e}")
-    return total
+
+    # Process files in parallel
+    sem = asyncio.Semaphore(_ZIP_FILE_CONCURRENCY)
+
+    async def _process_file(col: str, topic: str, raw: bytes, fname: str) -> int:
+        async with sem:
+            text_content = _extract_text_from_bytes(raw, filename=fname)
+            if not text_content.strip():
+                return 0
+            chunks = _chunk_text(text_content)
+            return await _upsert_bilingual_chunks(
+                chunks, col, topic, llm_router, source_lang, progress_cb=progress_cb,
+            )
+
+    results = await asyncio.gather(*[_process_file(c, t, r, f) for c, t, r, f in files])
+    return sum(results)

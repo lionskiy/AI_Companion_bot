@@ -46,6 +46,10 @@ async def typing_action(bot: Bot, chat_id: int):
         yield
     finally:
         task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def make_handlers_router(adapter, dialog_service, bot: Bot) -> Router:

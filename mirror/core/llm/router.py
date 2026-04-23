@@ -93,11 +93,32 @@ class LLMRouter:
         return await self.call(task_kind=task_kind, messages=messages, tier=tier)
 
     async def embed(self, text_: str) -> list[float]:
+        results = await self.embed_batch([text_])
+        return results[0]
+
+    async def embed_batch(self, texts: list[str], batch_size: int = 100) -> list[list[float]]:
+        """Embed multiple texts with batched API calls and retry on timeout."""
+        if not texts:
+            return []
         routing = await self._get_routing("embedding", "*")
         api_key = self._get_api_key(routing.provider_id)
-        client = AsyncOpenAI(api_key=api_key)
-        resp = await client.embeddings.create(model=routing.model_id, input=sanitize_input(text_))
-        return resp.data[0].embedding
+        client = AsyncOpenAI(api_key=api_key, timeout=60.0)
+
+        all_embeddings: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            batch = [sanitize_input(t) for t in texts[i:i + batch_size]]
+            for attempt in range(3):
+                try:
+                    resp = await client.embeddings.create(model=routing.model_id, input=batch)
+                    # API returns embeddings in the same order as input
+                    all_embeddings.extend(e.embedding for e in sorted(resp.data, key=lambda x: x.index))
+                    break
+                except OpenAITimeoutError:
+                    if attempt < 2:
+                        await asyncio.sleep(2.0 * (attempt + 1))
+                        continue
+                    raise
+        return all_embeddings
 
     def invalidate_cache(self) -> None:
         self._routing_cache.clear()
@@ -155,7 +176,7 @@ class LLMRouter:
         api_key = self._get_api_key(provider_id)
 
         if provider_id == "openai":
-            client = AsyncOpenAI(api_key=api_key)
+            client = AsyncOpenAI(api_key=api_key, timeout=30.0)
             kwargs: dict = dict(
                 model=model_id,
                 messages=messages,
@@ -168,7 +189,7 @@ class LLMRouter:
             return resp.choices[0].message.content
 
         elif provider_id == "anthropic":
-            client = AsyncAnthropic(api_key=api_key)
+            client = AsyncAnthropic(api_key=api_key, timeout=30.0)
             system_msgs = [m["content"] for m in messages if m["role"] == "system"]
             chat_msgs = [m for m in messages if m["role"] != "system"]
             kwargs = dict(

@@ -100,6 +100,17 @@ class KBIngestResult(BaseModel):
     source: str
 
 
+class IngestJobView(BaseModel):
+    id: str
+    status: str          # running | done | error
+    filename: str
+    collection: str
+    chunks_added: Optional[int] = None
+    error: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
 class KBDatasetIngestRequest(BaseModel):
     collection: str
     dataset_url: str          # raw URL to JSON/JSONL/CSV file

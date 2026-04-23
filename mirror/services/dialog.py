@@ -1,3 +1,4 @@
+import asyncio
 import time
 from uuid import UUID
 
@@ -120,7 +121,7 @@ class DialogService:
         t0 = time.monotonic()
         uid = UUID(msg.global_user_id)
 
-        tier = await self._billing.get_tier(uid)
+        tier = await self._billing.get_tier(uid) or "free"
         try:
             await self._billing.check_quota(uid, tier, "messages")
         except Exception as e:
@@ -156,6 +157,8 @@ class DialogService:
 
         try:
             final_state = await self._graph.ainvoke(initial_state)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
         except Exception:
             logger.exception("dialog.graph_error", user_id=msg.global_user_id)
             await self._log_intent(uid, "chat", tier)

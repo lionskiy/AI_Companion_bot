@@ -27,6 +27,23 @@ async def lifespan(app: FastAPI):
     from mirror.db.session import close_db_pool, init_db_pool
     await init_db_pool()
 
+    # ── Ingest job queue ──────────────────────────────────────────────────────
+    from sqlalchemy import text as sa_text
+    import mirror.db.session as db_module
+    ingest_queue: asyncio.Queue = asyncio.Queue()
+    app.state.ingest_queue = ingest_queue
+    try:
+        async with db_module.async_session_factory() as _s:
+            _leftover = (await _s.execute(
+                sa_text("SELECT id FROM ingest_jobs WHERE status='queued' ORDER BY created_at")
+            )).fetchall()
+        for _row in _leftover:
+            await ingest_queue.put(_row[0])
+        if _leftover:
+            logger.info("ingest_jobs.requeued_on_start", count=len(_leftover))
+    except Exception:
+        logger.warning("ingest_jobs.requeue_failed")
+
     # ── App config cache ──────────────────────────────────────────────────────
     from mirror.services.dialog import load_app_config_cache
     await load_app_config_cache()
@@ -63,6 +80,11 @@ async def lifespan(app: FastAPI):
     from mirror.core.llm.router import LLMRouter
     llm_router = LLMRouter()
     app.state.llm_router = llm_router
+
+    # ── Ingest workers (3 concurrent) ─────────────────────────────────────────
+    from mirror.admin.router import _ingest_worker
+    for _ in range(3):
+        asyncio.create_task(_ingest_worker(ingest_queue, llm_router))
 
     from mirror.core.memory.service import MemoryService
     memory_service = MemoryService(redis_client=redis_client, llm_router=llm_router)
@@ -146,6 +168,17 @@ async def lifespan(app: FastAPI):
         )
         app.include_router(make_webhook_router(dp, bot))
         logger.info("telegram.webhook_set", url=webhook_url.split("/webhook")[0] + "/webhook/...")
+
+    # ── Reset zombie ingest jobs from previous run ────────────────────────────
+    try:
+        async with db_module.async_session_factory() as session:
+            await session.execute(
+                sa_text("UPDATE ingest_jobs SET status='error', error='Прервано: сервер перезапущен', "
+                        "updated_at=now() WHERE status='running'")
+            )
+            await session.commit()
+    except Exception:
+        logger.warning("ingest_jobs.reset_failed")
 
     logger.info("mirror.startup.complete")
     yield

@@ -38,7 +38,27 @@ class DailyRitualService:
         if profile and not getattr(profile, "daily_ritual_enabled", True):
             return RITUAL_DISABLED_MSG
         ritual = await self.build_ritual(uid, state)
+        await self._log_ritual(uid, ritual)
         return self.format_ritual_message(ritual)
+
+    async def _log_ritual(self, user_id: UUID, ritual: "DailyRitual") -> None:
+        from sqlalchemy import text
+        transit_info = None
+        if ritual.transit:
+            transit_info = f"{ritual.transit.planet} в {ritual.transit.sign}"
+        try:
+            async with db_module.async_session_factory() as session:
+                await session.execute(
+                    text(
+                        "INSERT INTO daily_ritual_log (user_id, ritual_date, card_name, transit_info, status) "
+                        "VALUES (:uid, :d, :card, :transit, 'sent') "
+                        "ON CONFLICT (user_id, ritual_date) DO NOTHING"
+                    ),
+                    {"uid": str(user_id), "d": ritual.date, "card": ritual.card.name, "transit": transit_info},
+                )
+                await session.commit()
+        except Exception:
+            logger.warning("daily_ritual.log_failed", user_id=str(user_id))
 
     async def build_ritual(self, user_id: UUID, state: dict | None = None) -> DailyRitual:
         cards = self._tarot.draw_cards("single")

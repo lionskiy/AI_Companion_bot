@@ -53,13 +53,13 @@ label,.form-label{color:#c0c8d4!important}
 .card-header{background:var(--bg-elevated);border-bottom:1px solid var(--border);border-radius:10px 10px 0 0!important;font-weight:600;color:var(--text-primary);padding:.75rem 1rem}
 
 /* ── Stat cards ── */
-.stat-card{border-radius:10px;padding:1.1rem}
+.stat-card{border-radius:8px;padding:.55rem .75rem;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.15rem;text-align:center}
 .stat-card.blue{background:linear-gradient(135deg,#1a1f4e,#252d6e);border:1px solid #3d4fb5}
 .stat-card.green{background:linear-gradient(135deg,#0a2318,#0d3321);border:1px solid #1a5e38}
 .stat-card.purple{background:linear-gradient(135deg,#21104a,#2d1666);border:1px solid #5b2fa6}
 .stat-card.rose{background:linear-gradient(135deg,#3a0a18,#5a1228);border:1px solid #8b1a35}
-.stat-num{font-size:2.4rem;font-weight:700;color:#f1f5f9;line-height:1.1;margin:.3rem 0 .1rem}
-.stat-label{font-size:.72rem;color:#94a3b8;letter-spacing:.06em;text-transform:uppercase}
+.stat-num{font-size:1.45rem;font-weight:700;color:#f1f5f9;line-height:1;white-space:nowrap}
+.stat-label{font-size:.68rem;color:#94a3b8;letter-spacing:.04em;text-transform:uppercase;line-height:1.3}
 
 /* ── Tables ── */
 .table{color:var(--text-primary);--bs-table-bg:transparent;--bs-table-striped-bg:rgba(255,255,255,.02);--bs-table-hover-bg:rgba(255,255,255,.04)}
@@ -96,6 +96,7 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
 #login-screen{position:fixed;inset:0;background:var(--bg-base);display:flex;align-items:center;justify-content:center;z-index:9999}
 .login-box{background:var(--bg-surface);border:1px solid var(--border);border-radius:16px;padding:40px;width:360px}
 .login-box h4{color:#c084fc;font-weight:700}
+@keyframes kb-pulse{0%,100%{opacity:.5;transform:scaleX(.7)}50%{opacity:1;transform:scaleX(1)}}
 </style>
 </head>
 <body>
@@ -117,12 +118,12 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
 <div class="sidebar">
   <div class="logo">Mirror Admin<span>Stage 1</span></div>
   <nav class="nav flex-column mt-2">
-    <a class="nav-link active" onclick="nav('stats')" href="#"><i class="bi bi-bar-chart-line"></i> Dashboard</a>
-    <a class="nav-link" onclick="nav('config')" href="#"><i class="bi bi-sliders"></i> Конфиг</a>
-    <a class="nav-link" onclick="nav('routing')" href="#"><i class="bi bi-diagram-3"></i> LLM Routing</a>
-    <a class="nav-link" onclick="nav('quota')" href="#"><i class="bi bi-speedometer2"></i> Квоты</a>
-    <a class="nav-link" onclick="nav('users')" href="#"><i class="bi bi-people"></i> Пользователи</a>
-    <a class="nav-link" onclick="nav('kb')" href="#"><i class="bi bi-database"></i> База знаний</a>
+    <a class="nav-link active" href="#stats"><i class="bi bi-bar-chart-line"></i> Dashboard</a>
+    <a class="nav-link" href="#config"><i class="bi bi-sliders"></i> Конфиг</a>
+    <a class="nav-link" href="#routing"><i class="bi bi-diagram-3"></i> LLM Routing</a>
+    <a class="nav-link" href="#quota"><i class="bi bi-speedometer2"></i> Квоты</a>
+    <a class="nav-link" href="#users"><i class="bi bi-people"></i> Пользователи</a>
+    <a class="nav-link" href="#kb"><i class="bi bi-database"></i> База знаний</a>
     <div style="border-top:1px solid #30363d;margin:8px 8px 4px;padding-top:8px;font-size:.7rem;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;padding-left:8px">Инфраструктура</div>
     <a class="nav-link" href="http://localhost:19104/dashboard" target="_blank"><i class="bi bi-boxes"></i> Qdrant <i class="bi bi-box-arrow-up-right" style="font-size:.65rem;opacity:.5"></i></a>
     <a class="nav-link" href="http://localhost:19107" target="_blank"><i class="bi bi-hdd-network"></i> RabbitMQ <i class="bi bi-box-arrow-up-right" style="font-size:.65rem;opacity:.5"></i></a>
@@ -144,37 +145,34 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
       <h5 class="mb-0">Dashboard</h5>
       <button class="btn btn-outline-secondary btn-sm" onclick="refreshSection('stats')"><i class="bi bi-arrow-clockwise"></i> Обновить</button>
     </div>
-    <!-- Row 1: общие метрики -->
-    <div class="row g-3 mb-3">
-      <div class="col-md-3"><div class="stat-card blue">
+    <!-- Stats: одна строка из 7 карточек -->
+    <div class="row g-2 mb-4" style="flex-wrap:nowrap">
+      <div class="col"><div class="stat-card blue">
         <div class="stat-label">Всего юзеров</div>
         <div class="stat-num" id="s-users">—</div>
       </div></div>
-      <div class="col-md-3"><div class="stat-card green">
+      <div class="col"><div class="stat-card green">
         <div class="stat-label">Активны сегодня</div>
         <div class="stat-num" id="s-active">—</div>
       </div></div>
-      <div class="col-md-3"><div class="stat-card purple">
-        <div class="stat-label">Ритуалов отправлено</div>
+      <div class="col"><div class="stat-card rose">
+        <div class="stat-label">Сообщений сегодня</div>
+        <div class="stat-num" id="s-msgs">—</div>
+      </div></div>
+      <div class="col"><div class="stat-card purple">
+        <div class="stat-label">Ритуалов сегодня</div>
         <div class="stat-num" id="s-rituals">—</div>
       </div></div>
-      <div class="col-md-3"><div class="stat-card rose">
-        <div class="stat-num" id="s-msgs">—</div>
-        <div class="stat-label">Сообщений сегодня</div>
-      </div></div>
-    </div>
-    <!-- Row 2: intent-метрики -->
-    <div class="row g-3 mb-4">
-      <div class="col-md-4"><div class="stat-card" style="background:linear-gradient(135deg,#1a1230,#261848);border:1px solid #7c3aed">
+      <div class="col"><div class="stat-card" style="background:linear-gradient(135deg,#1a1230,#261848);border:1px solid #7c3aed">
         <div class="stat-label">🔮 Таро сегодня</div>
         <div class="stat-num" id="s-tarot">—</div>
       </div></div>
-      <div class="col-md-4"><div class="stat-card" style="background:linear-gradient(135deg,#0a1e2e,#0f2d42);border:1px solid #0ea5e9">
-        <div class="stat-label">⭐ Астрология сегодня</div>
+      <div class="col"><div class="stat-card" style="background:linear-gradient(135deg,#0a1e2e,#0f2d42);border:1px solid #0ea5e9">
+        <div class="stat-label">⭐ Астро сегодня</div>
         <div class="stat-num" id="s-astro">—</div>
       </div></div>
-      <div class="col-md-4"><div class="stat-card" style="background:linear-gradient(135deg,#1a1f1a,#212b21);border:1px solid #4ade80">
-        <div class="stat-label">💬 Просто чат сегодня</div>
+      <div class="col"><div class="stat-card" style="background:linear-gradient(135deg,#1a1f1a,#212b21);border:1px solid #4ade80">
+        <div class="stat-label">💬 Чат сегодня</div>
         <div class="stat-num" id="s-chat">—</div>
       </div></div>
     </div>
@@ -300,22 +298,22 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
         <!-- Tabs -->
         <ul class="nav nav-tabs mb-3" style="border-color:#30363d">
           <li class="nav-item">
-            <a class="nav-link active" id="kb-tab-text" onclick="kbTab('text')" href="#" style="color:#8b949e;border-color:#30363d transparent transparent">
+            <a class="nav-link active" id="kb-tab-text" onclick="kbTab('text');return false;" href="javascript:void(0)" style="color:#8b949e;border-color:#30363d transparent transparent">
               <i class="bi bi-pencil-square"></i> Текст вручную
             </a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" id="kb-tab-url" onclick="kbTab('url')" href="#" style="color:#8b949e">
+            <a class="nav-link" id="kb-tab-url" onclick="kbTab('url');return false;" href="javascript:void(0)" style="color:#8b949e">
               <i class="bi bi-link-45deg"></i> По URL
             </a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" id="kb-tab-file" onclick="kbTab('file')" href="#" style="color:#8b949e">
+            <a class="nav-link" id="kb-tab-file" onclick="kbTab('file');return false;" href="javascript:void(0)" style="color:#8b949e">
               <i class="bi bi-file-earmark-arrow-up"></i> Загрузить файл
             </a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" id="kb-tab-dataset" onclick="kbTab('dataset')" href="#" style="color:#8b949e">
+            <a class="nav-link" id="kb-tab-dataset" onclick="kbTab('dataset');return false;" href="javascript:void(0)" style="color:#8b949e">
               <i class="bi bi-database-add"></i> Датасеты
             </a>
           </li>
@@ -393,18 +391,18 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
             </div>
             <div class="col-12">
               <label class="form-label" style="font-size:.8rem;color:#8b949e">ФАЙЛ</label>
-              <input type="file" class="form-control" id="kb-file-input" accept=".txt,.md,.pdf,.docx,.epub,.json,.csv,.zip,.rst,.log">
+              <input type="file" class="form-control" id="kb-file-input" accept=".txt,.md,.pdf,.docx,.epub,.fb2,.json,.csv,.zip,.rst,.log">
               <div class="mt-1" style="font-size:.75rem;color:#555">
-                Поддерживается: TXT, MD, PDF, DOCX, EPUB, JSON, CSV, ZIP (архив с файлами)
+                Поддерживается: TXT, MD, PDF, DOCX, EPUB, FB2, JSON, CSV, ZIP (архив с файлами)
               </div>
             </div>
             <div class="col-12">
               <button class="btn btn-primary" onclick="addKBFile()" id="kb-file-btn">
                 <i class="bi bi-upload"></i> Загрузить файл
               </button>
-              <span id="kb-file-result" class="ms-3 text-secondary" style="font-size:.85rem"></span>
             </div>
           </div>
+
         </div>
 
         <!-- Tab: Dataset -->
@@ -463,6 +461,21 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
             </div>
           </div>
 
+        </div>
+      </div>
+    </div>
+
+    <!-- Jobs queue (always visible in KB section) -->
+    <div class="card mt-3" id="ingest-jobs-card">
+      <div class="card-header p-3 d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-layers"></i> Очередь загрузок</span>
+        <button class="btn btn-sm" style="font-size:.72rem;padding:2px 8px;background:#1a2535;border:1px solid #2d4a6e;color:#7cb9e8" onclick="loadIngestJobs()">
+          <i class="bi bi-arrow-clockwise"></i> Обновить
+        </button>
+      </div>
+      <div class="card-body p-2">
+        <div id="ingest-jobs-list">
+          <div style="font-size:.8rem;color:#555;padding:.4rem">Загрузка...</div>
         </div>
       </div>
     </div>
@@ -536,7 +549,8 @@ document.getElementById('token-input').addEventListener('keydown', e => { if(e.k
 
 function showApp() {
   document.getElementById('login-screen').style.display = 'none';
-  loadSection('stats');
+  const initial = location.hash.replace('#', '') || 'stats';
+  nav(initial);
 }
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -562,12 +576,17 @@ function toast(msg, ok=true) {
 
 // ── Nav ───────────────────────────────────────────────────────────────────────
 const _loadedSections = new Set();
+const _SECTIONS = ['stats', 'config', 'routing', 'quota', 'users', 'kb'];
 
 function nav(name) {
+  if (!_SECTIONS.includes(name)) name = 'stats';
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-  document.getElementById('sec-' + name).classList.add('active');
-  document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
-  event.target.closest('.nav-link').classList.add('active');
+  const sec = document.getElementById('sec-' + name);
+  if (sec) sec.classList.add('active');
+  document.querySelectorAll('.sidebar .nav-link').forEach(l => {
+    l.classList.toggle('active', l.getAttribute('href') === '#' + name);
+  });
+  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
   loadSection(name);
 }
 function loadSection(name, force=false) {
@@ -580,6 +599,10 @@ function refreshSection(name) {
   _loadedSections.delete(name);
   loadSection(name);
 }
+window.addEventListener('hashchange', () => {
+  const name = location.hash.replace('#', '') || 'stats';
+  nav(name);
+});
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
 async function loadStats() {
@@ -842,6 +865,7 @@ function kbTab(name) {
     tab.classList.toggle('active', t === name);
     tab.style.color = t === name ? '#e0e0e0' : '#8b949e';
   });
+  loadIngestJobs();
 }
 
 function _fillCollectionSelects(names) {
@@ -968,9 +992,7 @@ async function addKBFile() {
   const fileInput = document.getElementById('kb-file-input');
   if (!fileInput.files.length) { toast('Выбери файл', false); return; }
   const btn = document.getElementById('kb-file-btn');
-  const res = document.getElementById('kb-file-result');
-  btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Обрабатываем...';
-  res.textContent = 'Читаем файл...';
+  btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Отправляем...';
   try {
     const formData = new FormData();
     formData.append('collection', col);
@@ -984,14 +1006,119 @@ async function addKBFile() {
     });
     if (!r.ok) throw new Error(await r.text());
     const data = await r.json();
-    toast(`Добавлено ${data.chunks_added} чанков из файла`);
-    res.textContent = `✓ ${data.chunks_added} фрагментов добавлено`;
-    res.style.color = '#4ade80';
+    toast(`Задача создана: ${data.filename}`);
     fileInput.value = '';
     document.getElementById('kb-file-topic').value = '';
-    refreshSection('kb');
-  } catch(e) { toast('Ошибка: ' + e.message, false); res.textContent = ''; }
+    loadIngestJobs();
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
   finally { btn.disabled = false; btn.innerHTML = '<i class="bi bi-upload"></i> Загрузить файл'; }
+}
+
+let _jobsPollTimer = null;
+let _jobsHadRunning = false;
+
+function _escAttr(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function loadIngestJobs() {
+  const container = document.getElementById('ingest-jobs-list');
+  if (!container) return;
+  clearTimeout(_jobsPollTimer);
+  try {
+    const r = await fetch(API + '/admin/kb/jobs', {headers: {'X-Admin-Token': TOKEN}});
+    if (!r.ok) return;
+    const jobs = await r.json();
+    if (!jobs.length) {
+      container.innerHTML = '<div style="font-size:.8rem;color:#555;padding:.4rem">Задач нет</div>';
+      _jobsHadRunning = false;
+      return;
+    }
+    const hasActive = jobs.some(j => j.status === 'running' || j.status === 'queued');
+    container.innerHTML = jobs.map(j => {
+      const icons = {running: '⏳', queued: '🕐', done: '✅', error: '❌'};
+      const ic = icons[j.status] || '❓';
+      const ts = new Date(j.created_at).toLocaleString('ru-RU', {hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'});
+      const errText = _escAttr(j.error || '');
+      const elapsedSec = Math.floor((Date.now() - new Date(j.updated_at || j.created_at).getTime()) / 1000);
+      const elapsedStr = elapsedSec >= 60 ? `${Math.floor(elapsedSec/60)}м ${elapsedSec%60}с` : `${elapsedSec}с`;
+      const detail = j.status === 'done'
+        ? `<span style="color:#4ade80">${j.chunks_added} фрагментов</span>`
+        : j.status === 'queued'
+        ? `<span style="color:#8b949e;font-size:.72rem">в очереди</span>`
+        : j.status === 'error'
+        ? `<span style="color:#f87171" title="${errText}">${_escAttr((j.error||'').slice(0,60))}…</span>`
+        : (() => {
+            const pct = j.chunks_total > 0 ? Math.min(100, Math.round(j.chunks_done / j.chunks_total * 100)) : null;
+            const barW = pct !== null ? pct + '%' : (j.chunks_done > 0 ? '40%' : '15%');
+            const label = j.chunks_total > 0
+              ? `${j.chunks_done} / ${j.chunks_total} фр.`
+              : (j.chunks_done > 0 ? `${j.chunks_done} фр.` : '...');
+            return `<span style="display:inline-flex;align-items:center;gap:.4rem">
+              <span style="display:inline-block;width:90px;height:6px;background:#1e2d3d;border-radius:3px;overflow:hidden">
+                <span style="display:block;height:100%;background:linear-gradient(90deg,#7cb9e8,#4ade80);width:${barW};animation:kb-pulse 1.5s ease-in-out infinite"></span>
+              </span>
+              <span style="color:#f0a500;font-size:.72rem">${label} · ${elapsedStr}</span>
+            </span>`;
+          })();
+      let actionBtn;
+      if (j.status === 'running' || j.status === 'queued') {
+        actionBtn = `<button onclick="cancelJob('${j.id}')" style="font-size:.7rem;padding:1px 6px;background:transparent;border:1px solid #f87171;color:#f87171;border-radius:4px;cursor:pointer">Стоп</button>`;
+      } else if (j.status === 'error') {
+        actionBtn = `<button onclick="retryJob('${j.id}')" style="font-size:.7rem;padding:1px 6px;background:transparent;border:1px solid #7cb9e8;color:#7cb9e8;border-radius:4px;cursor:pointer;margin-right:2px">↻</button>`
+                  + `<button onclick="deleteJob('${j.id}')" style="font-size:.7rem;padding:1px 6px;background:transparent;border:1px solid #444;color:#666;border-radius:4px;cursor:pointer">✕</button>`;
+      } else {
+        actionBtn = `<button onclick="deleteJob('${j.id}')" style="font-size:.7rem;padding:1px 6px;background:transparent;border:1px solid #444;color:#666;border-radius:4px;cursor:pointer">✕</button>`;
+      }
+      return `<div style="display:flex;align-items:center;gap:.6rem;padding:.4rem .5rem;border-bottom:1px solid #1e2d3d;font-size:.78rem">
+        <span>${ic}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c9d1d9" title="${_escAttr(j.filename)}">${_escAttr(j.filename)}</span>
+        <span style="color:#7cb9e8;white-space:nowrap">${_escAttr(j.collection)}</span>
+        <span style="white-space:nowrap">${detail}</span>
+        <span style="color:#555;white-space:nowrap">${ts}</span>
+        <span style="white-space:nowrap">${actionBtn}</span>
+      </div>`;
+    }).join('');
+    // refresh KB stats when transitioning active → all done
+    if (_jobsHadRunning && !hasActive) refreshSection('kb');
+    _jobsHadRunning = hasActive;
+    // poll if any active jobs younger than 30 min
+    const freshActive = jobs.some(j => (j.status === 'running' || j.status === 'queued') &&
+      (Date.now() - new Date(j.created_at).getTime()) < 30 * 60 * 1000);
+    if (freshActive) _jobsPollTimer = setTimeout(loadIngestJobs, 3000);
+  } catch(e) { /* silent */ }
+}
+
+async function cancelJob(jobId) {
+  try {
+    const r = await fetch(API + '/admin/kb/jobs/' + jobId + '/cancel', {
+      method: 'POST', headers: {'X-Admin-Token': TOKEN}
+    });
+    if (!r.ok) throw new Error(await r.text());
+    toast('Задача отменена');
+    loadIngestJobs();
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+async function deleteJob(jobId) {
+  try {
+    const r = await fetch(API + '/admin/kb/jobs/' + jobId, {
+      method: 'DELETE', headers: {'X-Admin-Token': TOKEN}
+    });
+    if (!r.ok) throw new Error(await r.text());
+    loadIngestJobs();
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+async function retryJob(jobId) {
+  try {
+    const r = await fetch(API + '/admin/kb/jobs/' + jobId + '/retry', {
+      method: 'POST', headers: {'X-Admin-Token': TOKEN}
+    });
+    if (!r.ok) throw new Error(await r.text());
+    toast('Задача поставлена в очередь повторно');
+    loadIngestJobs();
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
 }
 
 async function deleteKBEntry(col, id) {

@@ -10,7 +10,14 @@ INTENTS = ["astrology", "tarot", "daily_ritual", "chat", "help", "cancel"]
 
 _CLASSIFY_PROMPT = (
     "Classify the user's intent into exactly one of: "
-    "astrology, tarot, daily_ritual, chat, help, cancel.\n"
+    "astrology, tarot, daily_ritual, chat, help, cancel.\n\n"
+    "Intent definitions:\n"
+    "- daily_ritual: morning ritual, card of the day (карта дня), daily affirmation, ежедневный ритуал\n"
+    "- tarot: tarot spread/reading, fortune telling, past-present-future, расклад, гадание\n"
+    "- astrology: birth chart, transits, horoscope, натальная карта, транзиты\n"
+    "- help: asking what the bot can do\n"
+    "- cancel: stop, change topic\n"
+    "- chat: everything else\n\n"
     'Reply with JSON: {{"intent": "<intent>", "confidence": <0.0-1.0>}}\n\n'
     "User message: {message}"
 )
