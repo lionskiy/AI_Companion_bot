@@ -396,7 +396,7 @@ async def _qdrant_collection_exists(client, name: str) -> bool:
 
 @router.get("/kb/stats", response_model=list[KBStatsEntry], dependencies=[Depends(_verify_token)])
 async def kb_stats():
-    client = AsyncQdrantClient(url=settings.qdrant_url)
+    client = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
     try:
         result = []
         for col in await _qdrant_kb_names(client):
@@ -412,7 +412,7 @@ async def kb_stats():
 
 @router.get("/kb/entries/{collection}", response_model=list[KBEntryPreview], dependencies=[Depends(_verify_token)])
 async def kb_entries(collection: str, limit: int = 30):
-    client = AsyncQdrantClient(url=settings.qdrant_url)
+    client = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
     if not await _qdrant_collection_exists(client, collection):
         await client.close()
         raise HTTPException(status_code=400, detail="Unknown collection")
@@ -444,7 +444,7 @@ async def kb_add(body: KBAddRequest, request: Request):
         raise HTTPException(status_code=503, detail="LLM router not ready")
     embedding = await llm_router.embed(f"{body.topic}\n{body.text}")
     point_id = str(uuid_module.uuid4())
-    client = AsyncQdrantClient(url=settings.qdrant_url)
+    client = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
     try:
         await client.upsert(
             collection_name=body.collection,
@@ -462,7 +462,7 @@ async def kb_add(body: KBAddRequest, request: Request):
 
 @router.delete("/kb/entry/{collection}/{point_id}", dependencies=[Depends(_verify_token)])
 async def kb_delete(collection: str, point_id: str):
-    client = AsyncQdrantClient(url=settings.qdrant_url)
+    client = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
     try:
         await client.delete(
             collection_name=collection,
@@ -485,7 +485,7 @@ async def kb_create_collection(body: KBCreateCollectionRequest):
         raise HTTPException(400, f"Имя {name!r} зарезервировано системой")
 
     from qdrant_client.models import Distance, VectorParams
-    client = AsyncQdrantClient(url=settings.qdrant_url)
+    client = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
     try:
         existing = {c.name for c in (await client.get_collections()).collections}
         if name in existing:
@@ -507,7 +507,7 @@ async def kb_delete_collection(collection: str, confirm: str = ""):
     if collection in _SYSTEM_COLLECTIONS:
         raise HTTPException(403, "Нельзя удалять системные коллекции памяти пользователей")
 
-    client = AsyncQdrantClient(url=settings.qdrant_url)
+    client = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
     try:
         if not await _qdrant_collection_exists(client, collection):
             raise HTTPException(404, f"Коллекция {collection!r} не найдена")
@@ -530,7 +530,7 @@ async def kb_delete_collection(collection: str, confirm: str = ""):
 @router.get("/kb/collections", dependencies=[Depends(_verify_token)])
 async def kb_list_collections():
     """List all Qdrant KB collections (excluding system) with enriched stats."""
-    client = AsyncQdrantClient(url=settings.qdrant_url)
+    client = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
     try:
         names = await _qdrant_kb_names(client)
         result = []
@@ -769,10 +769,22 @@ async def _run_ingest_job(
         except Exception:
             pass
 
+    async def _set_total(n: int) -> None:
+        try:
+            async with db_module.async_session_factory() as s:
+                await s.execute(
+                    text("UPDATE ingest_jobs SET chunks_total=:n, updated_at=now() WHERE id=:id"),
+                    {"n": n, "id": job_id},
+                )
+                await s.commit()
+        except Exception:
+            pass
+
     try:
         if filename.lower().endswith(".zip"):
             chunks_total = await _ingest_zip(
-                content, collection, file_topic, llm_router, source_lang, progress_cb=_progress
+                content, collection, file_topic, llm_router, source_lang,
+                progress_cb=_progress, set_total_cb=_set_total,
             )
         else:
             text_content = _extract_text_from_bytes(content, filename=filename, mime=mime)
@@ -1685,7 +1697,7 @@ async def _upsert_bilingual_chunks(
 
     sub_batches = [chunks[s:s + _PROCESS_BATCH] for s in range(0, n_chunks, _PROCESS_BATCH)]
 
-    client = AsyncQdrantClient(url=settings.qdrant_url)
+    client = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
     total_added = 0
     # Defined before try so finally can always cancel it on error
     pending_tr: asyncio.Task | None = None
@@ -1777,7 +1789,7 @@ async def _upsert_bilingual_entries(
         for t, tx, emb, l in zip(all_topics, all_texts, all_embs, all_langs)
     ]
 
-    qdrant = AsyncQdrantClient(url=settings.qdrant_url)
+    qdrant = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
     try:
         for i in range(0, len(all_points), _UPSERT_BATCH):
             await qdrant.upsert(collection_name=collection, points=all_points[i:i + _UPSERT_BATCH])
@@ -1789,7 +1801,7 @@ async def _upsert_bilingual_entries(
 async def _ensure_collection(name: str) -> None:
     """Create Qdrant collection if it does not exist yet."""
     from qdrant_client.models import Distance, VectorParams
-    client = AsyncQdrantClient(url=settings.qdrant_url)
+    client = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
     try:
         existing = {c.name for c in (await client.get_collections()).collections}
         if name not in existing:
@@ -1803,7 +1815,7 @@ async def _ensure_collection(name: str) -> None:
 
 
 async def _ingest_zip(data: bytes, collection: str, base_topic: str, llm_router, source_lang: str = "auto",
-                      progress_cb=None) -> int:
+                      progress_cb=None, set_total_cb=None) -> int:
     """Ingest all files from a ZIP archive.
 
     Files are processed in parallel (_ZIP_FILE_CONCURRENCY at a time).
@@ -1823,8 +1835,8 @@ async def _ingest_zip(data: bytes, collection: str, base_topic: str, llm_router,
             for col in folder_collections:
                 await _ensure_collection(col)
 
-            # Read all file bytes synchronously (ZipFile is not thread-safe for concurrent reads)
-            files: list[tuple[str, str, bytes, str]] = []  # (collection, topic, raw, filename)
+            # Phase 1: read + extract + chunk synchronously — gives us total before embed
+            file_jobs: list[tuple[str, str, list[str]]] = []  # (collection, topic, chunks)
             for name in zf.namelist():
                 if name.endswith("/") or name.startswith("__MACOSX"):
                     continue
@@ -1835,22 +1847,27 @@ async def _ingest_zip(data: bytes, collection: str, base_topic: str, llm_router,
                 target_col = parts[0] if len(parts) > 1 and parts[0].startswith("knowledge_") else collection
                 book_name = filename.rsplit(".", 1)[0]
                 file_topic = f"{base_topic} / {book_name}" if base_topic else book_name
-                files.append((target_col, file_topic, zf.read(name), filename))
+                raw = zf.read(name)
+                text_content = _extract_text_from_bytes(raw, filename=filename)
+                if not text_content.strip():
+                    continue
+                file_jobs.append((target_col, file_topic, _chunk_text(text_content)))
     except zipfile.BadZipFile as e:
         raise HTTPException(status_code=400, detail=f"Некорректный ZIP: {e}")
 
-    # Process files in parallel
+    # Report total chunks so progress bar can show X / N
+    total_chunks = sum(len(ch) for _, _, ch in file_jobs)
+    if set_total_cb and total_chunks:
+        await set_total_cb(total_chunks)
+
+    # Phase 2: embed + upsert in parallel
     sem = asyncio.Semaphore(_ZIP_FILE_CONCURRENCY)
 
-    async def _process_file(col: str, topic: str, raw: bytes, fname: str) -> int:
+    async def _process_file(col: str, topic: str, chunks: list[str]) -> int:
         async with sem:
-            text_content = _extract_text_from_bytes(raw, filename=fname)
-            if not text_content.strip():
-                return 0
-            chunks = _chunk_text(text_content)
             return await _upsert_bilingual_chunks(
                 chunks, col, topic, llm_router, source_lang, progress_cb=progress_cb,
             )
 
-    results = await asyncio.gather(*[_process_file(c, t, r, f) for c, t, r, f in files])
+    results = await asyncio.gather(*[_process_file(c, t, ch) for c, t, ch in file_jobs])
     return sum(results)
