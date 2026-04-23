@@ -1,7 +1,9 @@
 # Mirror — Admin API Reference
 
 Base path: `/admin`  
-Auth: `Authorization: Bearer <JWT>` (токен из `ADMIN_SECRET_KEY`)
+Auth: `Authorization: Bearer <token>` где токен = значение `ADMIN_TOKEN` из `.env`
+
+Токен вводится в login-экране Admin UI и хранится в `sessionStorage` браузера.
 
 ---
 
@@ -10,7 +12,6 @@ Auth: `Authorization: Bearer <JWT>` (токен из `ADMIN_SECRET_KEY`)
 ### GET /admin/stats
 Статистика дашборда.
 
-**Response:**
 ```json
 {
   "total_users": 42,
@@ -22,7 +23,9 @@ Auth: `Authorization: Bearer <JWT>` (токен из `ADMIN_SECRET_KEY`)
   "chat_today": 111
 }
 ```
-`chat_today` = `messages_today - tarot_today - astrology_today - rituals_sent_today`
+- `messages_today` — из Redis quota-счётчиков
+- `active_today` — уникальных пользователей с сообщениями сегодня
+- `chat_today` = `messages_today - tarot_today - astrology_today - rituals_sent_today`
 
 ---
 
@@ -32,27 +35,27 @@ Auth: `Authorization: Bearer <JWT>` (токен из `ADMIN_SECRET_KEY`)
 Все ключи из таблицы `app_config`.
 
 ### PUT /admin/config/{key}
-Обновить значение ключа.
+Обновить значение. Автоматически инвалидирует in-memory кэш app_config в DialogService.
 
 ```json
 { "value": "новый текст" }
 ```
 
 Ключевые ключи:
-- `system_prompt_base` — базовый system prompt
-- `onboarding_message` — prompt первого сообщения
-- `crisis_response` — текст при `risk_level=crisis`
-- `referral_hint` — подсказка про специалиста
+- `system_prompt_base` — базовый system prompt компаньона
+- `onboarding_message` — prompt первого сообщения (/start)
+- `crisis_response` — текст при `risk_level=crisis` (обязательно: номер 8-800-2000-122)
+- `referral_hint` — подсказка про живого специалиста
 
 ---
 
 ## LLM Routing
 
-### GET /admin/llm-routing
+### GET /admin/routing
 Вся таблица `llm_routing`.
 
-### PUT /admin/llm-routing/{task_kind}/{tier}
-Обновить роутинг для конкретного task_kind + tier.
+### PUT /admin/routing/{task_kind}
+Обновить роутинг для task_kind. Инвалидирует кэш LLMRouter.
 
 ```json
 {
@@ -64,6 +67,19 @@ Auth: `Authorization: Bearer <JWT>` (токен из `ADMIN_SECRET_KEY`)
 }
 ```
 
+### GET /admin/llm-keys
+Список провайдеров и замаскированные API ключи.
+
+### PUT /admin/llm-keys/{provider}
+Обновить API ключ провайдера (`openai` / `anthropic`).
+
+```json
+{ "api_key": "sk-..." }
+```
+
+### GET /admin/llm-models
+Получить список доступных моделей OpenAI (вызывает OpenAI API, используется в UI при выборе модели).
+
 ---
 
 ## Quota Config
@@ -72,7 +88,7 @@ Auth: `Authorization: Bearer <JWT>` (токен из `ADMIN_SECRET_KEY`)
 Все тарифы из `quota_config`.
 
 ### PUT /admin/quota/{tier}
-Обновить лимиты тарифа.
+Обновить лимиты тарифа. Инвалидирует кэш BillingService.
 
 ```json
 {
@@ -87,12 +103,11 @@ Auth: `Authorization: Bearer <JWT>` (токен из `ADMIN_SECRET_KEY`)
 ## Users
 
 ### GET /admin/users?limit=50&offset=0
-Список пользователей с TG-метаданными.
+Список пользователей с TG-метаданными (JOIN channel_identities).
 
 ```json
 [{
   "user_id": "uuid",
-  "username": "Имя Фамилия",
   "full_name": "Имя Фамилия",
   "tg_username": "username",
   "is_premium": false,
@@ -102,37 +117,58 @@ Auth: `Authorization: Bearer <JWT>` (токен из `ADMIN_SECRET_KEY`)
 }]
 ```
 
+### PUT /admin/users/{user_id}/ritual?enabled=true
+Включить или выключить ежедневный ритуал для конкретного пользователя.
+
 ---
 
 ## Knowledge Base
 
 ### GET /admin/kb/collections
-Список Qdrant коллекций с метриками.
+Список Qdrant коллекций с метриками (status, count, segments).
 
 ```json
-[{
-  "name": "knowledge_psych",
-  "count": 1420,
-  "status": "green",
-  "segments": 2
-}]
+[{"name": "knowledge_psych", "count": 1420, "status": "green", "segments": 2}]
 ```
 
 ### POST /admin/kb/collections
-Создать новую коллекцию.
+Создать новую коллекцию (vectors size=3072, distance=Cosine).
 
 ```json
 { "name": "knowledge_psych_cbt", "description": "КПТ техники и протоколы" }
 ```
 
-### GET /admin/kb/entries?collection=knowledge_psych&limit=20
-Просмотр записей в коллекции.
+### DELETE /admin/kb/collections/{collection}?confirm=yes
+Удалить коллекцию со всеми данными. Требует `confirm=yes`.
 
-### DELETE /admin/kb/entries/{point_id}?collection=knowledge_psych
-Удалить точку из коллекции.
+### GET /admin/kb/stats
+Список коллекций с количеством точек (упрощённый, без деталей статуса).
+
+### GET /admin/kb/entries/{collection}?limit=20&offset=0
+Просмотр записей коллекции (topic + text preview).
+
+### POST /admin/kb/add
+Добавить одну запись вручную.
+
+```json
+{
+  "collection": "knowledge_psych",
+  "topic": "КПТ — когнитивное искажение",
+  "text": "текст записи"
+}
+```
+
+### DELETE /admin/kb/entry/{collection}/{point_id}
+Удалить одну точку из коллекции.
+
+### GET /admin/kb/hf-search?query=psychology+therapy&limit=10
+Поиск датасетов на HuggingFace Hub по ключевым словам.
+
+### GET /admin/kb/hf-splits/{repo_owner}/{repo_name}
+Получить список splits и preview полей датасета с HuggingFace.
 
 ### POST /admin/kb/ingest-url
-Загрузить контент с URL.
+Загрузить и нарезать контент с URL (HTML, текст).
 
 ```json
 {
@@ -146,13 +182,13 @@ Auth: `Authorization: Bearer <JWT>` (токен из `ADMIN_SECRET_KEY`)
 ### POST /admin/kb/ingest-file
 Загрузить файл (multipart/form-data).
 
-Поддерживаемые форматы: `.txt`, `.md`, `.epub`, `.fb2`, `.pdf`, `.zip`, `.docx`  
-Параметры формы: `collection`, `topic`, `source_lang`, `file`
+Форматы: `.txt`, `.md`, `.epub`, `.fb2`, `.pdf`, `.zip`, `.docx`  
+Параметры: `collection`, `topic`, `source_lang`, `file`
 
-ZIP-архив: если содержит папки с именами вида `knowledge_*` — файлы автоматически роутятся в соответствующие коллекции.
+ZIP-архив: папки вида `knowledge_*/` → авторутинг в соответствующую коллекцию (создаётся автоматически).
 
 ### POST /admin/kb/ingest-dataset
-Загрузить датасет (JSON/JSONL/CSV по URL).
+Загрузить датасет (JSON/JSONL/CSV по URL или с HuggingFace).
 
 ```json
 {
@@ -165,13 +201,11 @@ ZIP-архив: если содержит папки с именами вида 
   "limit": 0
 }
 ```
+`limit: 0` = загрузить все записи.
 
 ---
 
 ## System
-
-### POST /admin/cache/invalidate
-Сбросить кэш LLM роутинга и app_config.
 
 ### GET /health
 `{"status": "ok"}` — liveness probe
@@ -180,4 +214,4 @@ ZIP-архив: если содержит папки с именами вида 
 `{"status": "ready"}` — readiness probe
 
 ### GET /metrics
-Prometheus метрики (latency, request count и т.д.)
+Prometheus метрики (HTTP latency, request count, status codes)

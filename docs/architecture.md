@@ -321,25 +321,94 @@ ZIP-ингест поддерживает авторазметку по колл
 
 ---
 
+## Telegram команды
+
+| Команда | Поведение |
+|---------|-----------|
+| `/start` | Новая сессия, onboarding LLM ответ |
+| `/help` | Статичный текст с описанием возможностей |
+| `/quiet` | Отключает проактивные сообщения (`daily_ritual_enabled=false`) |
+| `/active` | Включает обратно |
+| Любой текст | `handle_message` → DialogService → LangGraph |
+
+---
+
+## Сервисы предметной области
+
+### AstrologyService
+- При первом запросе астрологии проверяет наличие данных рождения в `user_profiles`
+- Если данных нет — задаёт вопрос про дату/время/город рождения
+- Парсит ответ пользователя через LLM, сохраняет в `user_profiles`
+- Строит натальную карту (планеты, дома, аспекты) через библиотеку Kerykeion
+- Вычисляет текущие транзиты
+- RAG: `search_astro_knowledge()` → `knowledge_astro`
+- Кэширует натальную карту в Redis на 24ч
+
+### TarotService
+- Колода: 78 карт (22 старших + 56 младших аркана) из `tarot_deck.py`
+- Типы раскладов: `single` (1 карта), `three_card` (прошлое/настоящее/будущее), `celtic_cross` (10 карт) — определяется из текста запроса
+- Каждая карта может лечь перевёрнутой (`is_reversed`)
+- RAG: `search_tarot_knowledge()` → `knowledge_tarot` для каждой карты
+- LLM интерпретация: `tarot_interpret` task_kind
+
+### DailyRitualService
+- Утренний ритуал: карта таро дня + астро-транзит (если есть данные рождения) + аффирмация
+- `DailyRitualService.handle()` — по команде пользователя внутри диалога
+- `workers/tasks/daily_ritual.py` — Celery Beat 07:00 UTC, рассылка всем с `daily_ritual_enabled=True`
+- Лог в `daily_ritual_log`
+
+---
+
+## DB Session — Celery lazy-init
+
+FastAPI lifespan инициализирует `async_session_factory` при старте. Celery workers стартуют отдельно, lifespan не вызывается.
+
+`db/session.py` предоставляет:
+- `ensure_db_pool()` — ленивая инициализация, вызывается в начале каждой Celery async-задачи
+- `get_session()` — async context manager с автоинициализацией
+
+```python
+async def _my_celery_task_async():
+    await ensure_db_pool()
+    async with get_session() as session:
+        ...
+```
+
+---
+
+## Admin Auth
+
+Admin UI доступен по `/admin/ui/`. Вход через статичный токен:
+- `ADMIN_TOKEN` из `.env` — единый токен доступа
+- Хранится в `sessionStorage` браузера после ввода
+- Передаётся в заголовке `Authorization: Bearer <token>`
+- JWT (`jwt_handler.py`) используется для будущих Web-эндпоинтов Stage 2, не для текущего admin
+
+---
+
 ## Конфигурация
 
 Все параметры через `.env` → `mirror/config.py` (Pydantic Settings):
 
 ```
-DATABASE_URL          PostgreSQL async DSN
-REDIS_URL             Redis DSN
-QDRANT_URL            Qdrant HTTP URL
-NATS_URL              NATS server URL
-RABBITMQ_URL          Celery broker URL
-TELEGRAM_BOT_TOKEN    Telegram Bot API token
+DATABASE_URL             PostgreSQL async DSN
+REDIS_URL                Redis DSN
+QDRANT_URL               Qdrant HTTP URL
+NATS_URL                 NATS server URL
+RABBITMQ_URL             Celery broker URL
+TELEGRAM_BOT_TOKEN       Telegram Bot API token
 TELEGRAM_WEBHOOK_SECRET  Секрет для webhook
-POLLING_MODE          true = polling, false = webhook
-OPENAI_API_KEY        OpenAI API key
-ANTHROPIC_API_KEY     Anthropic API key (опционально)
-BASE_URL              Публичный URL (для webhook)
-ADMIN_SECRET_KEY      JWT секрет admin panel
-APP_ENV               development / production
+POLLING_MODE             true = polling (dev), false = webhook (prod)
+OPENAI_API_KEY           OpenAI API key
+ANTHROPIC_API_KEY        Anthropic API key (для fallback chain)
+BASE_URL                 Публичный URL сервера (для webhook)
+ADMIN_TOKEN              Токен доступа к Admin Panel
+SECRET_KEY               JWT секрет (для будущего Web auth Stage 2)
+APP_ENV                  development / production
+SENTRY_DSN               Sentry DSN (опционально, для error tracking)
 ```
+
+**POLLING_MODE:** `true` — бот работает через long polling (удобно для локальной разработки без публичного URL), `false` — webhook (продакшн).
 
 ---
 
