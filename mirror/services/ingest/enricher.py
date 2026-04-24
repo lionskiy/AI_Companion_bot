@@ -8,7 +8,6 @@ import structlog
 
 logger = structlog.get_logger()
 
-_ENRICH_SEM: asyncio.Semaphore | None = None
 _DEFAULT_CATEGORY_LIST = [
     "КПТ", "психоанализ", "травма", "отношения", "детская_психология",
     "саморазвитие", "духовность", "нарратив", "тревога", "депрессия", "другое",
@@ -16,16 +15,12 @@ _DEFAULT_CATEGORY_LIST = [
 _METADATA_BATCH = 50
 
 
-def get_enrich_sem(concurrency: int = 4) -> asyncio.Semaphore:
-    global _ENRICH_SEM
-    if _ENRICH_SEM is None:
-        _ENRICH_SEM = asyncio.Semaphore(concurrency)
-    return _ENRICH_SEM
-
-
-async def enrich_context(text_sample: str, llm_router, concurrency: int = 4) -> Optional[str]:
+async def enrich_context(
+    text_sample: str,
+    llm_router,
+    sem: asyncio.Semaphore,
+) -> Optional[str]:
     """Generate a 2-3 sentence document summary for contextual prefix embedding."""
-    sem = get_enrich_sem(concurrency)
     prompt = (
         "Прочитай фрагмент документа. Напиши 2-3 предложения:\n"
         "1. О чём этот документ в целом\n"
@@ -50,22 +45,17 @@ async def enrich_context(text_sample: str, llm_router, concurrency: int = 4) -> 
 async def enrich_metadata_batch(
     chunks: list[str],
     llm_router,
-    category_list: Optional[list[str]] = None,
-    concurrency: int = 4,
+    category_list: Optional[list[str]],
+    sem: asyncio.Semaphore,
 ) -> list[dict]:
-    """Extract keywords + category for each chunk. Returns list of {keywords, category}."""
+    """Extract keywords + category for each chunk. Batches run concurrently via gather."""
     if not chunks:
         return []
-    sem = get_enrich_sem(concurrency)
     cats = category_list or _DEFAULT_CATEGORY_LIST
-    results: list[dict] = [{"keywords": None, "category": None}] * len(chunks)
 
-    # Process in batches of _METADATA_BATCH
-    for batch_start in range(0, len(chunks), _METADATA_BATCH):
+    async def _one_batch(batch_start: int) -> tuple[int, list[dict]]:
         batch = chunks[batch_start: batch_start + _METADATA_BATCH]
-        numbered = "\n\n".join(
-            f"[{i + 1}] {t[:800]}" for i, t in enumerate(batch)
-        )
+        numbered = "\n\n".join(f"[{i + 1}] {t[:800]}" for i, t in enumerate(batch))
         prompt = (
             f"Для каждого пронумерованного фрагмента извлеки:\n"
             f"- keywords: 3-5 ключевых слов через запятую\n"
@@ -81,15 +71,19 @@ async def enrich_metadata_batch(
                     max_tokens=1000,
                     temperature=0.1,
                 )
-            batch_meta = _parse_metadata_response(response, len(batch))
+            return batch_start, _parse_metadata_response(response, len(batch))
         except Exception as e:
             logger.warning("enricher.metadata_batch_failed",
                            batch_start=batch_start, error=str(e))
-            batch_meta = [{"keywords": None, "category": None}] * len(batch)
+            return batch_start, [{"keywords": None, "category": None}] * len(batch)
 
-        for i, meta in enumerate(batch_meta):
-            results[batch_start + i] = meta
+    batch_starts = list(range(0, len(chunks), _METADATA_BATCH))
+    batch_results = await asyncio.gather(*[_one_batch(s) for s in batch_starts])
 
+    results: list[dict] = [{"keywords": None, "category": None}] * len(chunks)
+    for start, meta_list in batch_results:
+        for i, meta in enumerate(meta_list):
+            results[start + i] = meta
     return results
 
 
@@ -111,12 +105,18 @@ def _parse_metadata_response(text: str, expected: int) -> list[dict]:
 
 
 def get_category_list(app_config_value: Optional[str]) -> list[str]:
-    """Parse category list from app_config JSON value, fallback to default."""
+    """Parse category list from app_config value (comma-separated or JSON list)."""
     if app_config_value:
+        v = app_config_value.strip()
+        # Try JSON list first
         try:
-            parsed = json.loads(app_config_value)
+            parsed = json.loads(v)
             if isinstance(parsed, list) and parsed:
-                return parsed
+                return [str(x).strip() for x in parsed if str(x).strip()]
         except Exception:
             pass
+        # Comma-separated plain text
+        cats = [c.strip() for c in v.split(",") if c.strip()]
+        if cats:
+            return cats
     return _DEFAULT_CATEGORY_LIST

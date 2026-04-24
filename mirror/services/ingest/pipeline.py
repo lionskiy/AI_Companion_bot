@@ -163,11 +163,16 @@ async def _extract_one_file(
 async def _chunk_and_enrich_file(
     job_id: str, file_id: str, filename: str,
     enrichment_context: bool, enrichment_metadata: bool,
-    llm_router, category_list: list[str], enrich_concurrency: int,
+    llm_router, category_list: list[str], enrich_sem: asyncio.Semaphore,
 ) -> int:
-    """Chunk file text, enrich, insert ingest_chunks. Returns count of chunks inserted."""
+    """Chunk file text, enrich, insert ingest_chunks. Returns count of chunks inserted.
+
+    _CHUNK_SEM is held only during disk I/O + text splitting.
+    LLM enrichment runs outside the semaphore so all files can enrich concurrently,
+    limited only by enrich_sem (one shared semaphore per job).
+    """
+    # ── Phase 1: read + chunk (hold _CHUNK_SEM only here) ────────────────────
     async with _CHUNK_SEM:
-        # Read file text from disk
         async with db_module.async_session_factory() as s:
             row = (await s.execute(
                 text("SELECT text_path, source_lang FROM ingest_files WHERE id=:fid"),
@@ -185,7 +190,6 @@ async def _chunk_and_enrich_file(
                        {"file_id": file_id, "error": str(e)})
             return 0
 
-        # Update status
         async with db_module.async_session_factory() as s:
             await s.execute(
                 text("UPDATE ingest_files SET file_status='chunking', updated_at=now() WHERE id=:fid"),
@@ -196,69 +200,71 @@ async def _chunk_and_enrich_file(
         chunks = chunk_text(raw_text)
         if not chunks:
             return 0
+    # _CHUNK_SEM released — LLM enrichment runs concurrently across all files
 
-        # Enrich: contextual prefix (1 LLM call per file)
-        doc_context: Optional[str] = None
-        if enrichment_context:
-            doc_context = await enrich_context(raw_text[:2000], llm_router, enrich_concurrency)
-            if doc_context:
-                async with db_module.async_session_factory() as s:
-                    await s.execute(
-                        text("UPDATE ingest_files SET document_context=:dc, updated_at=now() WHERE id=:fid"),
-                        {"dc": doc_context, "fid": file_id},
-                    )
-                    await s.commit()
-                await _log(job_id, "info", "enrich", "context_generated",
-                           {"file_id": file_id, "doc_context_len": len(doc_context)})
+    # ── Phase 2: LLM enrichment — context + metadata run in parallel ─────────
+    async def _get_context() -> Optional[str]:
+        if not enrichment_context:
+            return None
+        return await enrich_context(raw_text[:2000], llm_router, enrich_sem)
 
-        # Enrich: payload metadata (batched LLM calls)
-        metadata_list: list[dict] = [{"keywords": None, "category": None}] * len(chunks)
-        if enrichment_metadata:
-            metadata_list = await enrich_metadata_batch(
-                chunks, llm_router, category_list, enrich_concurrency
+    async def _get_metadata() -> list[dict]:
+        if not enrichment_metadata:
+            return [{"keywords": None, "category": None}] * len(chunks)
+        return await enrich_metadata_batch(chunks, llm_router, category_list, enrich_sem)
+
+    doc_context, metadata_list = await asyncio.gather(_get_context(), _get_metadata())
+
+    if doc_context:
+        async with db_module.async_session_factory() as s:
+            await s.execute(
+                text("UPDATE ingest_files SET document_context=:dc, updated_at=now() WHERE id=:fid"),
+                {"dc": doc_context, "fid": file_id},
             )
+            await s.commit()
+        await _log(job_id, "info", "enrich", "context_generated",
+                   {"file_id": file_id, "doc_context_len": len(doc_context)})
 
-        # Insert chunks in bulk
-        chunk_rows = []
-        for i, (chunk, meta) in enumerate(zip(chunks, metadata_list)):
-            chunk_id = str(uuid.uuid4())
-            chunk_rows.append({
-                "id": chunk_id,
-                "job_id": job_id,
-                "file_id": file_id,
-                "chunk_index": i,
-                "text": chunk,
-                "keywords": meta.get("keywords"),
-                "category": meta.get("category"),
-            })
+    # ── Phase 3: insert chunks to DB ─────────────────────────────────────────
+    chunk_rows = [
+        {
+            "id": str(uuid.uuid4()),
+            "job_id": job_id,
+            "file_id": file_id,
+            "chunk_index": i,
+            "text": chunk,
+            "keywords": meta.get("keywords"),
+            "category": meta.get("category"),
+        }
+        for i, (chunk, meta) in enumerate(zip(chunks, metadata_list))
+    ]
 
-        if chunk_rows:
-            async with db_module.async_session_factory() as s:
-                await s.execute(
-                    text(
-                        "INSERT INTO ingest_chunks (id, job_id, file_id, chunk_index, text, "
-                        "keywords, category, chunk_status, created_at) "
-                        "VALUES (:id, :job_id, :file_id, :chunk_index, :text, "
-                        ":keywords, :category, 'pending', now())"
-                    ),
-                    chunk_rows,
-                )
-                await s.execute(
-                    text("UPDATE ingest_files SET file_status='chunked', chunk_count=:n, "
-                         "updated_at=now() WHERE id=:fid"),
-                    {"n": len(chunks), "fid": file_id},
-                )
-                await s.commit()
+    if chunk_rows:
+        async with db_module.async_session_factory() as s:
+            await s.execute(
+                text(
+                    "INSERT INTO ingest_chunks (id, job_id, file_id, chunk_index, text, "
+                    "keywords, category, chunk_status, created_at) "
+                    "VALUES (:id, :job_id, :file_id, :chunk_index, :text, "
+                    ":keywords, :category, 'pending', now())"
+                ),
+                chunk_rows,
+            )
+            await s.execute(
+                text("UPDATE ingest_files SET file_status='chunked', chunk_count=:n, "
+                     "updated_at=now() WHERE id=:fid"),
+                {"n": len(chunks), "fid": file_id},
+            )
+            await s.commit()
 
-        await _increment_job(job_id, files_chunked=1)
-        await _log(job_id, "info", "chunk", "file_chunked",
-                   {"filename": filename, "chunk_count": len(chunks), "file_id": file_id})
+    await _increment_job(job_id, files_chunked=1)
+    await _log(job_id, "info", "chunk", "file_chunked",
+               {"filename": filename, "chunk_count": len(chunks), "file_id": file_id})
 
-        # Update enrichment counters (enrichment_done = chunks where metadata was processed)
-        if enrichment_metadata and metadata_list:
-            await _increment_job(job_id, enrichment_done=len(chunks))
+    if enrichment_metadata:
+        await _increment_job(job_id, enrichment_done=len(chunks))
 
-        return len(chunks)
+    return len(chunks)
 
 
 # ── Stage 4: Embed ────────────────────────────────────────────────────────────
@@ -472,10 +478,12 @@ async def run_ingest_job_v2(
         raise ValueError("Ни один файл не удалось обработать")
 
     # ── Stage 3: Chunk + Enrich ───────────────────────────────────────────────
+    # One semaphore per job controls concurrent LLM enrichment calls across all files.
+    enrich_sem = asyncio.Semaphore(enrich_concurrency)
     chunk_tasks = [
         _chunk_and_enrich_file(
             job_id, fid, fname, enrichment_context, enrichment_metadata,
-            llm_router, category_list, enrich_concurrency,
+            llm_router, category_list, enrich_sem,
         )
         for fid, fname, _ in file_ids
     ]
