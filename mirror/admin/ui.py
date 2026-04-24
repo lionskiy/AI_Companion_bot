@@ -383,37 +383,43 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
           </div>
         </div>
 
-        <!-- Tab: File -->
+        <!-- Tab: File (multi-upload) -->
         <div id="kb-pane-file" style="display:none">
-          <div class="row g-3">
-            <div class="col-md-4">
-              <label class="form-label" style="font-size:.8rem;color:#8b949e">КОЛЛЕКЦИЯ</label>
-              <select class="form-select" id="kb-file-col"></select>
-            </div>
-            <div class="col-md-4">
-              <label class="form-label" style="font-size:.8rem;color:#8b949e">ТЕМА (необязательно)</label>
-              <input type="text" class="form-control" id="kb-file-topic" placeholder="Оставь пустым — возьмём из имени файла">
-            </div>
-            <div class="col-md-4">
-              <label class="form-label" style="font-size:.8rem;color:#8b949e">ЯЗЫК ИСТОЧНИКА</label>
-              <select class="form-select" id="kb-file-lang">
-                <option value="auto">Авто</option><option value="en">EN</option><option value="ru">RU</option>
-              </select>
-            </div>
-            <div class="col-12">
-              <label class="form-label" style="font-size:.8rem;color:#8b949e">ФАЙЛ</label>
-              <input type="file" class="form-control" id="kb-file-input" accept=".txt,.md,.pdf,.docx,.epub,.fb2,.json,.csv,.zip,.rst,.log">
-              <div class="mt-1" style="font-size:.75rem;color:#555">
-                Поддерживается: TXT, MD, PDF, DOCX, EPUB, FB2, JSON, CSV, ZIP (архив с файлами)
-              </div>
-            </div>
-            <div class="col-12">
-              <button class="btn btn-primary" onclick="addKBFile()" id="kb-file-btn">
-                <i class="bi bi-upload"></i> Загрузить файл
-              </button>
-            </div>
+          <div id="kb-drop-zone"
+               onclick="document.getElementById('kb-file-input').click()"
+               ondragover="event.preventDefault();this.style.borderColor='#a78bfa'"
+               ondragleave="this.style.borderColor='#30363d'"
+               ondrop="onFilesDrop(event)"
+               style="border:2px dashed #30363d;border-radius:8px;padding:22px 20px;text-align:center;cursor:pointer;transition:border-color .15s;margin-bottom:.75rem">
+            <i class="bi bi-cloud-upload" style="font-size:1.6rem;color:#6e7681"></i>
+            <div style="color:#8b949e;margin-top:6px;font-size:.9rem">Перетащи файлы или <span style="color:#a78bfa">выбери</span></div>
+            <div style="font-size:.73rem;color:#555;margin-top:3px">PDF, DOCX, EPUB, FB2, TXT, ZIP · Можно несколько файлов сразу</div>
+          </div>
+          <input type="file" id="kb-file-input" style="display:none" multiple
+                 accept=".txt,.md,.pdf,.docx,.epub,.fb2,.json,.csv,.zip,.rst,.log"
+                 onchange="onFilesSelected(this.files)">
+
+          <!-- Per-file preview table -->
+          <div id="kb-file-list" style="display:none;margin-bottom:.75rem;overflow-x:auto">
+            <table style="width:100%;font-size:.8rem;border-collapse:collapse">
+              <thead>
+                <tr style="color:#6e7681;font-size:.71rem;text-transform:uppercase;letter-spacing:.04em">
+                  <th style="padding:.3rem .5rem;border-bottom:1px solid #21262d">Файл</th>
+                  <th style="padding:.3rem .5rem;border-bottom:1px solid #21262d;width:210px">Коллекция <span style="color:#555;font-weight:400">(авто из имени)</span></th>
+                  <th style="padding:.3rem .5rem;border-bottom:1px solid #21262d;width:190px">Тема (необязательно)</th>
+                  <th style="padding:.3rem .5rem;border-bottom:1px solid #21262d;width:22px"></th>
+                </tr>
+              </thead>
+              <tbody id="kb-file-rows"></tbody>
+            </table>
           </div>
 
+          <div class="d-flex align-items-center gap-3">
+            <button class="btn btn-primary" id="kb-file-btn" style="display:none" onclick="uploadAllFiles()">
+              <i class="bi bi-upload"></i> Загрузить все
+            </button>
+            <span id="kb-file-result" style="font-size:.85rem"></span>
+          </div>
         </div>
 
         <!-- Tab: Dataset -->
@@ -1007,14 +1013,22 @@ function kbTab(name) {
 }
 
 function _fillCollectionSelects(names) {
-  const IDS = ['kb-col','kb-url-col','kb-file-col','kb-ds-col','kb-browse-col'];
-  IDS.forEach(id => {
+  // Selects where "— выбери —" placeholder is needed (no pre-selection)
+  ['kb-col','kb-url-col','kb-ds-col'].forEach(id => {
     const sel = document.getElementById(id);
     if (!sel) return;
     const prev = sel.value;
-    sel.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join('');
+    sel.innerHTML = '<option value="" disabled selected>— выбери коллекцию —</option>' +
+      names.map(n => `<option value="${n}">${n}</option>`).join('');
     if (names.includes(prev)) sel.value = prev;
   });
+  // Browse select — keep current or pick first
+  const browse = document.getElementById('kb-browse-col');
+  if (browse) {
+    const prev = browse.value;
+    browse.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join('');
+    if (names.includes(prev)) browse.value = prev;
+  }
 }
 
 const _KB_STATUS_STYLE = {
@@ -1089,6 +1103,7 @@ async function addKBEntry() {
   const col = document.getElementById('kb-col').value;
   const topic = document.getElementById('kb-topic').value.trim();
   const text = document.getElementById('kb-text').value.trim();
+  if (!col) { toast('Выбери коллекцию', false); return; }
   if (!topic || !text) { toast('Заполни тему и текст', false); return; }
   const btn = document.getElementById('kb-add-btn');
   btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Встраиваем...';
@@ -1107,6 +1122,7 @@ async function addKBUrl() {
   const url = document.getElementById('kb-url-input').value.trim();
   const topic = document.getElementById('kb-url-topic').value.trim();
   const source_lang = document.getElementById('kb-url-lang').value;
+  if (!col) { toast('Выбери коллекцию', false); return; }
   if (!url) { toast('Введи URL', false); return; }
   const btn = document.getElementById('kb-url-btn');
   const res = document.getElementById('kb-url-result');
@@ -1124,33 +1140,116 @@ async function addKBUrl() {
   finally { btn.disabled = false; btn.innerHTML = '<i class="bi bi-cloud-download"></i> Загрузить и добавить'; }
 }
 
-async function addKBFile() {
-  const col = document.getElementById('kb-file-col').value;
-  const topic = document.getElementById('kb-file-topic').value.trim();
-  const source_lang = document.getElementById('kb-file-lang').value;
-  const fileInput = document.getElementById('kb-file-input');
-  if (!fileInput.files.length) { toast('Выбери файл', false); return; }
+// ── Multi-file upload ─────────────────────────────────────────────────────────
+const _TRANSLIT = {
+  'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo','ж':'zh','з':'z',
+  'и':'i','й':'j','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r',
+  'с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh',
+  'щ':'shch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya',
+};
+
+function _slugify(s) {
+  s = s.toLowerCase().split('').map(c => _TRANSLIT[c] ?? c).join('');
+  s = s.replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  if (s.length < 3) s = 'kb_' + s;
+  return s.slice(0, 50);
+}
+
+function _deriveCollection(filename) {
+  return _slugify(filename.replace(/\.[^.]+$/, ''));
+}
+
+function _fmtSize(b) {
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  return (b/1048576).toFixed(1) + ' MB';
+}
+
+let _filesToUpload = [];
+
+function onFilesDrop(e) {
+  e.preventDefault();
+  document.getElementById('kb-drop-zone').style.borderColor = '#30363d';
+  onFilesSelected(e.dataTransfer.files);
+}
+
+function onFilesSelected(files) {
+  const arr = Array.from(files);
+  if (!arr.length) return;
+  _filesToUpload = arr;
+  const tbody = document.getElementById('kb-file-rows');
+  tbody.innerHTML = arr.map((f, i) => {
+    const col = _deriveCollection(f.name);
+    const bad = !/^[a-z][a-z0-9_]{2,49}$/.test(col);
+    return `<tr id="kf-row-${i}" style="border-bottom:1px solid #1a2030">
+      <td style="padding:.4rem .5rem">
+        <div style="color:#c9d1d9;word-break:break-all">${escHtml(f.name)}</div>
+        <div style="font-size:.7rem;color:#6e7681">${_fmtSize(f.size)}</div>
+      </td>
+      <td style="padding:.4rem .5rem">
+        <input type="text" class="form-control form-control-sm${bad?' border-warning':''}"
+               id="kf-col-${i}" value="${escHtml(col)}" placeholder="knowledge_...">
+        ${bad?`<div style="font-size:.68rem;color:#f59e0b;margin-top:2px"><i class="bi bi-exclamation-triangle"></i> Скорректируй имя</div>`:''}
+      </td>
+      <td style="padding:.4rem .5rem">
+        <input type="text" class="form-control form-control-sm" id="kf-topic-${i}" placeholder="авто из имени файла">
+      </td>
+      <td style="padding:.35rem .5rem;text-align:center">
+        <button style="background:none;border:none;color:#555;cursor:pointer;font-size:1.1rem;padding:0;line-height:1"
+                title="Убрать" onclick="document.getElementById('kf-row-${i}').remove();_filesToUpload[${i}]=null">✕</button>
+      </td>
+    </tr>`;
+  }).join('');
+  document.getElementById('kb-file-list').style.display = '';
+  document.getElementById('kb-file-btn').style.display = '';
+  document.getElementById('kb-file-result').textContent = '';
+}
+
+async function uploadAllFiles() {
   const btn = document.getElementById('kb-file-btn');
-  btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Отправляем...';
-  try {
-    const formData = new FormData();
-    formData.append('collection', col);
-    formData.append('topic', topic);
-    formData.append('source_lang', source_lang);
-    formData.append('file', fileInput.files[0]);
-    const r = await fetch(API + '/admin/kb/ingest-file', {
-      method: 'POST',
-      headers: {'X-Admin-Token': TOKEN},
-      body: formData,
-    });
-    if (!r.ok) throw new Error(await r.text());
-    const data = await r.json();
-    toast(`Задача создана: ${data.filename}`);
-    fileInput.value = '';
-    document.getElementById('kb-file-topic').value = '';
+  const res = document.getElementById('kb-file-result');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Загружаем...';
+  res.textContent = '';
+  let ok = 0, fail = 0;
+  for (let i = 0; i < _filesToUpload.length; i++) {
+    const file = _filesToUpload[i];
+    if (!file) continue;
+    const col = document.getElementById('kf-col-' + i)?.value?.trim() || '';
+    const topic = document.getElementById('kf-topic-' + i)?.value?.trim() || '';
+    if (!col) { toast(`Укажи коллекцию для: ${file.name}`, false); fail++; continue; }
+    if (!/^[a-z][a-z0-9_]{2,49}$/.test(col)) {
+      toast(`Некорректное имя коллекции «${col}» для: ${file.name}`, false); fail++; continue;
+    }
+    try {
+      const fd = new FormData();
+      fd.append('collection', col);
+      fd.append('topic', topic);
+      fd.append('source_lang', 'auto');
+      fd.append('file', file);
+      const r = await fetch(API + '/admin/kb/ingest-file', {
+        method: 'POST', headers: {'X-Admin-Token': TOKEN}, body: fd,
+      });
+      if (!r.ok) throw new Error(await r.text());
+      ok++;
+      const row = document.getElementById('kf-row-' + i);
+      if (row) { row.style.opacity = '.4'; row.style.pointerEvents = 'none'; }
+    } catch(e) {
+      toast(`${file.name}: ${e.message}`, false);
+      fail++;
+    }
+  }
+  btn.disabled = false;
+  btn.innerHTML = '<i class="bi bi-upload"></i> Загрузить все';
+  if (ok) {
+    res.textContent = `✓ ${ok} файл${ok===1?'':ok<5?'а':'ов'} в очереди${fail?', ошибок: '+fail:''}`;
+    res.style.color = fail ? '#f59e0b' : '#4ade80';
+    document.getElementById('kb-file-input').value = '';
+    _filesToUpload = [];
     loadIngestJobs();
-  } catch(e) { toast('Ошибка: ' + e.message, false); }
-  finally { btn.disabled = false; btn.innerHTML = '<i class="bi bi-upload"></i> Загрузить файл'; }
+  } else {
+    res.textContent = 'Ничего не загружено';
+    res.style.color = '#f87171';
+  }
 }
 
 let _jobsPollTimer = null;
@@ -1333,6 +1432,7 @@ async function addKBDataset() {
   const afield = document.getElementById('kb-ds-afield').value.trim();
   const limit = parseInt(document.getElementById('kb-ds-limit').value) || 0;
   const source_lang = document.getElementById('kb-ds-lang').value;
+  if (!col) { toast('Выбери коллекцию', false); return; }
   if (!url) { toast('Введи URL датасета', false); return; }
 
   const btn = document.getElementById('kb-ds-btn');

@@ -660,10 +660,31 @@ async def kb_ingest_url(body: KBIngestURLRequest, request: Request):
     return KBIngestResult(chunks_added=count, collection=body.collection, source=body.url)
 
 
+_RU_TRANSLIT: dict[str, str] = {
+    'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo','ж':'zh','з':'z',
+    'и':'i','й':'j','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r',
+    'с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh',
+    'щ':'shch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya',
+}
+
+
+def _derive_collection_name(filename: str) -> str:
+    """Slugify filename (minus extension) into a valid Qdrant collection name."""
+    import re
+    base = filename.rsplit(".", 1)[0] if "." in filename else filename
+    s = base.lower()
+    s = "".join(_RU_TRANSLIT.get(c, c) for c in s)
+    s = re.sub(r"[^a-z0-9_]", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    if len(s) < 3:
+        s = "kb_" + s
+    return s[:50]
+
+
 @router.post("/kb/ingest-file", dependencies=[Depends(_verify_token)])
 async def kb_ingest_file(
     request: Request,
-    collection: str = Form(...),
+    collection: str = Form(""),   # empty → auto-derived from filename
     topic: str = Form(""),
     source_lang: str = Form("auto"),
     file: UploadFile = File(...),
@@ -677,6 +698,20 @@ async def kb_ingest_file(
 
     filename = file.filename or "upload"
     mime = file.content_type or ""
+
+    # Auto-derive collection from filename if not provided
+    if not collection:
+        collection = _derive_collection_name(filename)
+
+    # Validate collection name
+    import re as _re
+    if not _re.match(r"^[a-z][a-z0-9_]{2,49}$", collection):
+        raise HTTPException(status_code=400,
+                            detail=f"Некорректное имя коллекции: {collection!r} — только латиница, цифры, _")
+
+    # Auto-create collection in Qdrant if it doesn't exist yet
+    await _ensure_collection(collection)
+
     file_topic = topic or filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
 
     # Check file size limit before reading
