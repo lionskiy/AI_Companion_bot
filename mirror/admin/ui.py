@@ -97,6 +97,17 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
 .login-box{background:var(--bg-surface);border:1px solid var(--border);border-radius:16px;padding:40px;width:360px}
 .login-box h4{color:#c084fc;font-weight:700}
 @keyframes kb-pulse{0%,100%{opacity:.5;transform:scaleX(.7)}50%{opacity:1;transform:scaleX(1)}}
+/* ── Config page ── */
+.cfg-section-hdr{font-size:.69rem;text-transform:uppercase;letter-spacing:.07em;color:#6e7681;font-weight:600;margin-bottom:.6rem;padding-bottom:.3rem;border-bottom:1px solid #1c2230}
+.cfg-item-title{font-size:.83rem;font-weight:500;color:#c9d1d9;line-height:1.3}
+.cfg-item-syskey{font-size:.69rem;color:#6e7681;font-family:monospace;font-weight:400}
+.cfg-item-desc{font-size:.73rem;color:#8b949e;line-height:1.38}
+.cfg-prompt-card{border-color:#252d40!important;background:#0f141d!important}
+.cfg-textarea{font-family:monospace;font-size:.8rem!important}
+.cfg-compact{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:.55rem .65rem;height:100%}
+.cfg-ctrl-row{display:flex;align-items:center;gap:.4rem}
+.cfg-ctrl-small{width:88px!important;flex-shrink:0}
+.cfg-save-sm{padding:2px 8px!important;font-size:.73rem!important;flex-shrink:0;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -619,27 +630,154 @@ async function loadStats() {
   tbody.innerHTML = (users||[]).map(userRow).join('');
 }
 
+// ── Config metadata ───────────────────────────────────────────────────────────
+const CONFIG_META = {
+  kb_enrichment_context_prompt: {
+    label: 'Промпт: описание документа',
+    desc: 'Инструкция для LLM при генерации краткого резюме всего документа. Добавляется как контекст к вектору каждого чанка.',
+    type: 'prompt',
+  },
+  kb_enrichment_metadata_prompt: {
+    label: 'Промпт: теги и категория',
+    desc: 'Инструкция для извлечения ключевых слов и классификации отдельного фрагмента.',
+    type: 'prompt',
+  },
+  kb_enrichment_context: {
+    label: 'Контекст документа',
+    desc: 'LLM пишет краткое описание всего документа — добавляется к вектору каждого чанка',
+    type: 'bool',
+  },
+  kb_enrichment_metadata: {
+    label: 'Теги и категория чанков',
+    desc: 'LLM извлекает ключевые слова и категорию для каждого фрагмента',
+    type: 'bool',
+  },
+  kb_enrich_concurrency: {
+    label: 'Параллельность обогащения',
+    desc: 'Число одновременных LLM-запросов при чанкинге',
+    type: 'number',
+  },
+  kb_max_zip_size_mb: {
+    label: 'Лимит ZIP (МБ)',
+    desc: 'Максимальный размер загружаемого ZIP-архива',
+    type: 'number',
+  },
+  kb_category_list: {
+    label: 'Таксономия контента',
+    desc: 'Темы через запятую — LLM относит каждый чанк к одной из них при обогащении. Это НЕ коллекции Qdrant, а тематика внутри документов. Если пусто — категории не назначаются, поиск работает нормально.',
+    type: 'text',
+  },
+};
+
 // ── Config ────────────────────────────────────────────────────────────────────
 async function loadConfig() {
   const items = await apiGet('/admin/config');
   if (!items) return;
-  document.getElementById('config-list').innerHTML = items.map(item => `
-    <div class="card mb-3">
-      <div class="card-header p-3 d-flex justify-content-between align-items-center">
-        <code style="color:#a78bfa">${item.key}</code>
-      </div>
-      <div class="card-body">
-        <textarea class="form-control mb-2" id="cfg-${item.key}" rows="${item.value.length>100?6:3}">${escHtml(item.value)}</textarea>
-        <button class="btn btn-primary btn-sm" onclick="saveConfig('${item.key}')">
-          <i class="bi bi-save"></i> Сохранить
-        </button>
-      </div>
-    </div>`).join('');
+
+  const TYPE_ORDER = {prompt:0, bool:1, number:2, text:3};
+  const detectType = item => {
+    const m = CONFIG_META[item.key];
+    if (m) return m.type;
+    const v = (item.value||'').trim().toLowerCase();
+    if (v==='true'||v==='false') return 'bool';
+    if (/^\d+(\.\d+)?$/.test(v)) return 'number';
+    return item.value.length > 100 ? 'prompt' : 'text';
+  };
+
+  const sorted = [...items].sort((a,b) => (TYPE_ORDER[detectType(a)]??4)-(TYPE_ORDER[detectType(b)]??4));
+  const prompts = sorted.filter(i => detectType(i)==='prompt');
+  const compact = sorted.filter(i => detectType(i)!=='prompt');
+  let html = '';
+
+  // Промпты — 2 колонки
+  if (prompts.length) {
+    html += `<div class="mb-4">
+      <div class="cfg-section-hdr">Промпты</div>
+      <div class="row g-3">`;
+    for (const item of prompts) {
+      const m = CONFIG_META[item.key]||{};
+      html += `<div class="col-md-6">
+        <div class="card h-100 cfg-prompt-card">
+          <div class="card-body p-3">
+            <div class="cfg-item-title">${m.label||item.key} <span class="cfg-item-syskey">(${item.key})</span></div>
+            ${m.desc?`<div class="cfg-item-desc mb-2">${m.desc}</div>`:''}
+            <textarea class="form-control cfg-textarea mb-2" id="cfg-${item.key}" rows="5">${escHtml(item.value)}</textarea>
+            <button class="btn btn-save" onclick="saveConfig('${item.key}')"><i class="bi bi-check2"></i> Сохранить</button>
+          </div>
+        </div>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  // Компактные параметры: bool/number — 3 колонки, text — 2 колонки
+  if (compact.length) {
+    html += `<div>
+      <div class="cfg-section-hdr">Параметры</div>
+      <div class="row g-2">`;
+    for (const item of compact) {
+      const m = CONFIG_META[item.key]||{};
+      const type = detectType(item);
+      const label = m.label||item.key;
+      const desc = m.desc||'';
+      const colCls = type==='text' ? 'col-md-6' : 'col-md-4';
+      let inner = '';
+      if (type==='bool') {
+        const yes = (item.value||'').trim().toLowerCase()==='true';
+        inner = `<div class="cfg-ctrl-row mb-1">
+          <div style="flex:1;min-width:0"><div class="cfg-item-title">${label} <span class="cfg-item-syskey">(${item.key})</span></div></div>
+          <select class="form-select form-select-sm cfg-ctrl-small" id="cfg-${item.key}">
+            <option value="true"${yes?' selected':''}>Да</option>
+            <option value="false"${!yes?' selected':''}>Нет</option>
+          </select>
+          <button class="btn btn-save cfg-save-sm" onclick="saveConfig('${item.key}')"><i class="bi bi-check2"></i></button>
+        </div>${desc?`<div class="cfg-item-desc">${desc}</div>`:''}`;
+      } else if (type==='number') {
+        inner = `<div class="cfg-ctrl-row mb-1">
+          <div style="flex:1;min-width:0"><div class="cfg-item-title">${label} <span class="cfg-item-syskey">(${item.key})</span></div></div>
+          <input type="number" class="form-control form-control-sm cfg-ctrl-small" id="cfg-${item.key}" value="${escHtml(item.value)}">
+          <button class="btn btn-save cfg-save-sm" onclick="saveConfig('${item.key}')"><i class="bi bi-check2"></i></button>
+        </div>${desc?`<div class="cfg-item-desc">${desc}</div>`:''}`;
+      } else {
+        const autoBtn = item.key==='kb_category_list'
+          ? `<button class="btn btn-outline-secondary btn-sm cfg-save-sm" title="Заполнить из коллекций Qdrant" onclick="fillCategoriesFromCollections()"><i class="bi bi-stars"></i> Авто</button>`
+          : '';
+        inner = `<div class="cfg-item-title mb-1">${label} <span class="cfg-item-syskey">(${item.key})</span></div>
+          ${desc?`<div class="cfg-item-desc mb-1">${desc}</div>`:''}
+          <div class="d-flex gap-1 mt-1">
+            <input type="text" class="form-control form-control-sm" id="cfg-${item.key}" value="${escHtml(item.value)}">
+            ${autoBtn}
+            <button class="btn btn-save cfg-save-sm" onclick="saveConfig('${item.key}')"><i class="bi bi-check2"></i></button>
+          </div>`;
+      }
+      html += `<div class="${colCls}"><div class="cfg-compact">${inner}</div></div>`;
+    }
+    html += '</div></div>';
+  }
+
+  document.getElementById('config-list').innerHTML = html||'<div class="text-secondary py-3 text-center">Нет настроек</div>';
 }
+
 async function saveConfig(key) {
-  const value = document.getElementById('cfg-' + key).value;
-  try { await apiPut('/admin/config/' + key, {value}); toast('Сохранено: ' + key); }
-  catch(e) { toast('Ошибка: ' + e.message, false); }
+  const value = document.getElementById('cfg-'+key).value;
+  try { await apiPut('/admin/config/'+key, {value}); toast('Сохранено: '+key); }
+  catch(e) { toast('Ошибка: '+e.message, false); }
+}
+
+async function fillCategoriesFromCollections() {
+  const cols = await apiGet('/admin/kb/collections');
+  if (!cols||!cols.length) { toast('Нет коллекций', false); return; }
+  const COL_LABELS = {
+    knowledge_tarot:'Таро', knowledge_astro:'Астрология', knowledge_psych:'Психология',
+    knowledge_dreams:'Сонник', knowledge_numerology:'Нумерология',
+  };
+  const SYSTEM = ['user_episodes','user_facts'];
+  const cats = cols
+    .filter(c => !SYSTEM.includes(c.name))
+    .map(c => COL_LABELS[c.name] || c.name.replace(/^knowledge_/,'').replace(/_/g,' '))
+    .join(', ');
+  const el = document.getElementById('cfg-kb_category_list');
+  if (el) { el.value = cats; toast('Категории из коллекций — сохрани если нужно'); }
 }
 
 // ── Routing ───────────────────────────────────────────────────────────────────
@@ -1017,6 +1155,7 @@ async function addKBFile() {
 
 let _jobsPollTimer = null;
 let _jobsHadRunning = false;
+let _jobsPollActive = false;
 
 function _escAttr(s) {
   return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -1043,25 +1182,7 @@ async function loadIngestJobs() {
       const errText = _escAttr(j.error || '');
       const elapsedSec = Math.floor((Date.now() - new Date(j.updated_at || j.created_at).getTime()) / 1000);
       const elapsedStr = elapsedSec >= 60 ? `${Math.floor(elapsedSec/60)}м ${elapsedSec%60}с` : `${elapsedSec}с`;
-      const detail = j.status === 'done'
-        ? `<span style="color:#4ade80">${j.chunks_added} фрагментов</span>`
-        : j.status === 'queued'
-        ? `<span style="color:#8b949e;font-size:.72rem">в очереди</span>`
-        : j.status === 'error'
-        ? `<span style="color:#f87171" title="${errText}">${_escAttr((j.error||'').slice(0,60))}…</span>`
-        : (() => {
-            const pct = j.chunks_total > 0 ? Math.min(100, Math.round(j.chunks_done / j.chunks_total * 100)) : null;
-            const barW = pct !== null ? pct + '%' : (j.chunks_done > 0 ? '40%' : '15%');
-            const label = j.chunks_total > 0
-              ? `${j.chunks_done} / ${j.chunks_total} фр.`
-              : (j.chunks_done > 0 ? `${j.chunks_done} фр.` : '...');
-            return `<span style="display:inline-flex;align-items:center;gap:.4rem">
-              <span style="display:inline-block;width:90px;height:6px;background:#1e2d3d;border-radius:3px;overflow:hidden">
-                <span style="display:block;height:100%;background:linear-gradient(90deg,#7cb9e8,#4ade80);width:${barW};animation:kb-pulse 1.5s ease-in-out infinite"></span>
-              </span>
-              <span style="color:#f0a500;font-size:.72rem">${label} · ${elapsedStr}</span>
-            </span>`;
-          })();
+
       let actionBtn;
       if (j.status === 'running' || j.status === 'queued') {
         actionBtn = `<button onclick="cancelJob('${j.id}')" style="font-size:.7rem;padding:1px 6px;background:transparent;border:1px solid #f87171;color:#f87171;border-radius:4px;cursor:pointer">Стоп</button>`;
@@ -1071,22 +1192,62 @@ async function loadIngestJobs() {
       } else {
         actionBtn = `<button onclick="deleteJob('${j.id}')" style="font-size:.7rem;padding:1px 6px;background:transparent;border:1px solid #444;color:#666;border-radius:4px;cursor:pointer">✕</button>`;
       }
-      return `<div style="display:flex;align-items:center;gap:.6rem;padding:.4rem .5rem;border-bottom:1px solid #1e2d3d;font-size:.78rem">
-        <span>${ic}</span>
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c9d1d9" title="${_escAttr(j.filename)}">${_escAttr(j.filename)}</span>
-        <span style="color:#7cb9e8;white-space:nowrap">${_escAttr(j.collection)}</span>
-        <span style="white-space:nowrap">${detail}</span>
-        <span style="color:#555;white-space:nowrap">${ts}</span>
-        <span style="white-space:nowrap">${actionBtn}</span>
+
+      // Inline status summary for non-running jobs
+      let statusLine = '';
+      if (j.status === 'done') {
+        statusLine = `<span style="color:#4ade80;font-size:.72rem">✓ ${j.chunks_added} фрагментов</span>`;
+      } else if (j.status === 'queued') {
+        statusLine = `<span style="color:#8b949e;font-size:.72rem">в очереди</span>`;
+      } else if (j.status === 'error') {
+        statusLine = `<span style="color:#f87171;font-size:.72rem" title="${errText}">${_escAttr((j.error||'').slice(0,80))}</span>`;
+      }
+
+      // 3 progress bars for running jobs
+      let progressBars = '';
+      if (j.status === 'running') {
+        const ft = Math.max(j.files_total || 1, 1);
+        const fe = j.files_extracted || 0;
+        const fc = j.files_chunked || 0;
+        const ct = j.chunks_total || 0;
+        const cd = j.chunks_done || 0;
+        const pctEx  = Math.min(100, Math.round(fe / ft * 100));
+        const pctChk = Math.min(100, Math.round(fc / ft * 100));
+        const pctEmb = ct > 0 ? Math.min(100, Math.round(cd / ct * 100)) : 0;
+        const mkBar = (pct, grad, lbl) => {
+          return `<div style="display:flex;align-items:center;gap:.45rem;margin-top:3px">
+            <div style="width:110px;height:5px;background:#1e2d3d;border-radius:3px;overflow:hidden;flex-shrink:0">
+              <div style="height:100%;width:${pct}%;background:${grad};transition:width .4s ease"></div>
+            </div>
+            <span style="font-size:.67rem;color:#8b949e;white-space:nowrap">${lbl}</span>
+          </div>`;
+        };
+        progressBars = `<div style="margin-top:5px;padding-left:18px">
+          ${mkBar(pctEx,  'linear-gradient(90deg,#38bdf8,#60a5fa)', `Разархивация: ${fe} / ${j.files_total||'?'} файлов`)}
+          ${mkBar(pctChk, 'linear-gradient(90deg,#a78bfa,#c084fc)', `Чанкинг: ${fc} / ${j.files_total||'?'} файлов`)}
+          ${mkBar(pctEmb, 'linear-gradient(90deg,#4ade80,#86efac)', `Эмбеддинг: ${cd} / ${ct||'?'} фр. · ${elapsedStr}`)}
+        </div>`;
+      }
+
+      return `<div style="padding:.45rem .5rem;border-bottom:1px solid #1e2d3d;font-size:.78rem">
+        <div style="display:flex;align-items:center;gap:.5rem">
+          <span>${ic}</span>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c9d1d9" title="${_escAttr(j.filename)}">${_escAttr(j.filename)}</span>
+          <span style="color:#7cb9e8;white-space:nowrap;flex-shrink:0">${_escAttr(j.collection)}</span>
+          ${statusLine ? `<span style="white-space:nowrap;flex-shrink:0">${statusLine}</span>` : ''}
+          <span style="color:#555;white-space:nowrap;flex-shrink:0">${ts}</span>
+          <span style="white-space:nowrap;flex-shrink:0">${actionBtn}</span>
+        </div>
+        ${progressBars}
       </div>`;
     }).join('');
     // refresh KB stats when transitioning active → all done
     if (_jobsHadRunning && !hasActive) refreshSection('kb');
     _jobsHadRunning = hasActive;
-    // poll if any active jobs younger than 30 min
-    const freshActive = jobs.some(j => (j.status === 'running' || j.status === 'queued') &&
-      (Date.now() - new Date(j.created_at).getTime()) < 30 * 60 * 1000);
-    if (freshActive) _jobsPollTimer = setTimeout(loadIngestJobs, 3000);
+    // poll every 2s while any job is active
+    const freshActive = jobs.some(j => j.status === 'running' || j.status === 'queued');
+    _jobsPollActive = freshActive;
+    if (freshActive) _jobsPollTimer = setTimeout(loadIngestJobs, 2000);
   } catch(e) { /* silent */ }
 }
 

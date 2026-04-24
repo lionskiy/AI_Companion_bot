@@ -152,7 +152,10 @@ async def lifespan(app: FastAPI):
 
     if settings.polling_mode:
         # Long polling — не нужен публичный URL
-        await bot.delete_webhook(drop_pending_updates=True)
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            logger.warning("telegram.delete_webhook_failed", error=str(e))
         _polling_task = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
         logger.info("telegram.polling_started")
     else:
@@ -179,6 +182,13 @@ async def lifespan(app: FastAPI):
             await session.commit()
     except Exception:
         logger.warning("ingest_jobs.reset_failed")
+
+    # ── Cleanup stale ingest disk dirs ────────────────────────────────────────
+    try:
+        from mirror.services.ingest.cleanup import cleanup_stale_dirs
+        await cleanup_stale_dirs()
+    except Exception:
+        logger.warning("ingest.cleanup_stale_dirs_failed")
 
     logger.info("mirror.startup.complete")
     yield

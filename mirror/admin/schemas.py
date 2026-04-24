@@ -102,13 +102,44 @@ class KBIngestResult(BaseModel):
 
 class IngestJobView(BaseModel):
     id: str
-    status: str          # running | done | error
+    status: str
+    stage: Optional[str] = None
     filename: str
     collection: str
     chunks_added: Optional[int] = None
+    files_total: Optional[int] = None
+    files_extracted: Optional[int] = None
+    files_chunked: Optional[int] = None
+    enrichment_total: Optional[int] = None
+    enrichment_done: Optional[int] = None
+    qdrant_upserted: Optional[int] = None
+    tier: Optional[str] = None
     error: Optional[str] = None
     created_at: str
     updated_at: str
+
+
+class IngestProgressResponse(BaseModel):
+    job_id: str
+    status: str
+    stage: Optional[str] = None
+    files_total: int = 0
+    files_extracted: int = 0
+    files_chunked: int = 0
+    enrichment_total: int = 0
+    enrichment_done: int = 0
+    qdrant_upserted: int = 0
+    tier: Optional[str] = None
+    error: Optional[str] = None
+
+
+class IngestLogEntry(BaseModel):
+    id: int
+    level: str
+    stage: Optional[str] = None
+    message: str
+    details: Optional[dict] = None
+    created_at: str
 
 
 class KBDatasetIngestRequest(BaseModel):

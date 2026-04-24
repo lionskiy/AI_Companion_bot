@@ -85,6 +85,7 @@ services:
       - "19100:8000"
     volumes:
       - ./mirror:/app/mirror
+      - ingest_data:/data/ingest
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://mirror:mirror@postgres:5432/mirror
@@ -159,3 +160,4 @@ volumes:
   qdrant_data:
   rabbitmq_data:
   appsmith_data:
+  ingest_data:

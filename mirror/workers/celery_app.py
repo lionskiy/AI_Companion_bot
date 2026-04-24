@@ -7,7 +7,12 @@ celery_app = Celery(
     "mirror",
     broker=settings.rabbitmq_url,
     backend=None,  # результаты не нужны
-    include=["mirror.workers.tasks.memory", "mirror.workers.tasks.daily_ritual", "mirror.workers.tasks.profile"],
+    include=[
+        "mirror.workers.tasks.memory",
+        "mirror.workers.tasks.daily_ritual",
+        "mirror.workers.tasks.profile",
+        "mirror.workers.tasks.ingest",
+    ],
 )
 
 celery_app.conf.update(
@@ -23,5 +28,9 @@ celery_app.conf.beat_schedule = {
     "send-daily-rituals": {
         "task": "mirror.workers.tasks.daily_ritual.send_daily_rituals",
         "schedule": crontab(minute=0),  # каждый час
+    },
+    "cleanup-ingest-logs": {
+        "task": "mirror.workers.tasks.ingest.cleanup_ingest_logs",
+        "schedule": crontab(hour=3, minute=0),  # ежедневно в 03:00 UTC
     },
 }

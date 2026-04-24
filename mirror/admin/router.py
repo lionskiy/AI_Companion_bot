@@ -28,6 +28,8 @@ from mirror.admin.schemas import (
     KBStatsEntry,
     LLMRoutingUpdate,
     LLMRoutingView,
+    IngestProgressResponse,
+    IngestLogEntry,
     QuotaConfigUpdate,
     QuotaConfigView,
     StatsView,
@@ -653,7 +655,7 @@ async def kb_ingest_url(body: KBIngestURLRequest, request: Request):
 
     topic = body.topic or _url_to_topic(body.url)
     chunks = _chunk_text(text_content)
-    count = await _upsert_bilingual_chunks(chunks, body.collection, topic, llm_router, body.source_lang)
+    count = await _upsert_chunks_simple(chunks, body.collection, topic, llm_router, body.source_lang)
     logger.info("admin.kb.ingest_url", collection=body.collection, url=body.url, chunks=count)
     return KBIngestResult(chunks_added=count, collection=body.collection, source=body.url)
 
@@ -666,24 +668,51 @@ async def kb_ingest_file(
     source_lang: str = Form("auto"),
     file: UploadFile = File(...),
 ):
+    import shutil
+    from pathlib import Path
+
     queue = getattr(request.app.state, "ingest_queue", None)
     if queue is None:
         raise HTTPException(status_code=503, detail="Очередь загрузок не инициализирована")
 
-    content = await file.read()
     filename = file.filename or "upload"
     mime = file.content_type or ""
     file_topic = topic or filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
 
+    # Check file size limit before reading
+    max_mb = 500
+    try:
+        async with db_module.async_session_factory() as s:
+            row = (await s.execute(text("SELECT value FROM app_config WHERE key='kb_max_zip_size_mb'"))).fetchone()
+            if row:
+                max_mb = int(row[0])
+    except Exception:
+        pass
+
+    content = await file.read()
+    if len(content) > max_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"Файл превышает лимит {max_mb} MB")
+
     job_id = str(uuid_module.uuid4())
+
+    # Save to disk volume (survives container restart)
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
+    job_dir = Path("/data/ingest") / job_id
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, lambda: job_dir.mkdir(parents=True, exist_ok=True))
+    orig_name = "original.zip" if filename.lower().endswith(".zip") else f"original.{ext}"
+    await loop.run_in_executor(None, (job_dir / orig_name).write_bytes, content)
+    tmp_path = str(job_dir)
+
     async with db_module.async_session_factory() as session:
         await session.execute(
             text(
-                "INSERT INTO ingest_jobs (id, status, filename, collection, file_data, file_mime, file_topic, source_lang) "
-                "VALUES (:id, 'queued', :fn, :col, :fd, :fm, :ft, :sl)"
+                "INSERT INTO ingest_jobs (id, status, stage, filename, collection, "
+                "file_mime, file_topic, source_lang, tmp_path, job_type) "
+                "VALUES (:id, 'queued', 'upload', :fn, :col, :fm, :ft, :sl, :tp, 'file')"
             ),
             {"id": job_id, "fn": filename, "col": collection,
-             "fd": content, "fm": mime, "ft": file_topic, "sl": source_lang},
+             "fm": mime, "ft": file_topic, "sl": source_lang, "tp": tmp_path},
         )
         await session.commit()
 
@@ -693,10 +722,9 @@ async def kb_ingest_file(
 
 
 async def _ingest_worker(queue: asyncio.Queue, llm_router) -> None:
-    """Pull job IDs from queue and process them one at a time (3 workers run concurrently).
+    """Pull job IDs from queue and process them. Worker loop never dies silently."""
+    from mirror.services.ingest.pipeline import run_embed_stage_only, run_ingest_job_v2
 
-    Catches all unexpected exceptions so the worker loop never dies silently.
-    """
     while True:
         job_id: str | None = None
         try:
@@ -705,18 +733,14 @@ async def _ingest_worker(queue: asyncio.Queue, llm_router) -> None:
             return
 
         try:
-            # Auto-detect OpenAI tier and calibrate concurrency (once per hour)
-            await _maybe_refresh_translate_sem()
-
             async with db_module.async_session_factory() as session:
                 row = (await session.execute(
-                    text("SELECT filename, collection, file_data, file_mime, file_topic, source_lang "
+                    text("SELECT filename, collection, file_topic, tmp_path, stage "
                          "FROM ingest_jobs WHERE id=:id AND status='queued'"),
                     {"id": job_id},
                 )).fetchone()
 
             if not row:
-                # Job was cancelled before we picked it up
                 queue.task_done()
                 continue
 
@@ -727,103 +751,47 @@ async def _ingest_worker(queue: asyncio.Queue, llm_router) -> None:
                 )
                 await session.commit()
 
-            await _run_ingest_job(
-                job_id, row.file_data, row.filename, row.file_mime,
-                row.collection, row.file_topic, llm_router, row.source_lang,
-            )
+            if row.stage == "embed":
+                # Smart resume: only re-embed pending chunks, skip extraction and chunking
+                total = await run_embed_stage_only(job_id=job_id, llm_router=llm_router)
+            else:
+                total = await run_ingest_job_v2(
+                    job_id=job_id,
+                    filename=row.filename,
+                    collection=row.collection,
+                    file_topic=row.file_topic or "",
+                    llm_router=llm_router,
+                )
+            async with db_module.async_session_factory() as session:
+                await session.execute(
+                    text("UPDATE ingest_jobs SET status='done', stage='done', "
+                         "chunks_added=:n, tmp_path=NULL, file_data=NULL, updated_at=now() "
+                         "WHERE id=:id AND status='running'"),
+                    {"n": total, "id": job_id},
+                )
+                await session.commit()
+            logger.info("admin.kb.ingest_job_done", job_id=job_id, chunks=total)
+
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            logger.error("ingest_worker.unexpected_error", job_id=job_id, error=str(exc))
-            if job_id:
-                try:
-                    async with db_module.async_session_factory() as s:
-                        await s.execute(
-                            text("UPDATE ingest_jobs SET status='error', "
-                                 "error='Внутренняя ошибка воркера', updated_at=now() "
-                                 "WHERE id=:id AND status='running'"),
-                            {"id": job_id},
-                        )
-                        await s.commit()
-                except Exception:
-                    pass
+            err = str(exc)[:500]
+            logger.error("ingest_worker.job_failed", job_id=job_id, error=err)
+            try:
+                async with db_module.async_session_factory() as s:
+                    await s.execute(
+                        text("UPDATE ingest_jobs SET status='error', error=:e, updated_at=now() "
+                             "WHERE id=:id AND status='running'"),
+                        {"e": err, "id": job_id},
+                    )
+                    await s.commit()
+            except Exception:
+                pass
         finally:
             try:
                 queue.task_done()
             except ValueError:
                 pass
-
-
-async def _run_ingest_job(
-    job_id: str, content: bytes, filename: str, mime: str,
-    collection: str, file_topic: str, llm_router, source_lang: str,
-) -> None:
-    async def _progress(n: int) -> None:
-        try:
-            async with db_module.async_session_factory() as s:
-                await s.execute(
-                    text("UPDATE ingest_jobs SET chunks_done = chunks_done + :n, updated_at=now() WHERE id=:id"),
-                    {"n": n, "id": job_id},
-                )
-                await s.commit()
-        except Exception:
-            pass
-
-    async def _set_total(n: int) -> None:
-        try:
-            async with db_module.async_session_factory() as s:
-                await s.execute(
-                    text("UPDATE ingest_jobs SET chunks_total=:n, updated_at=now() WHERE id=:id"),
-                    {"n": n, "id": job_id},
-                )
-                await s.commit()
-        except Exception:
-            pass
-
-    try:
-        if filename.lower().endswith(".zip"):
-            chunks_total = await _ingest_zip(
-                content, collection, file_topic, llm_router, source_lang,
-                progress_cb=_progress, set_total_cb=_set_total,
-            )
-        else:
-            text_content = _extract_text_from_bytes(content, filename=filename, mime=mime)
-            if not text_content.strip():
-                raise ValueError("Не удалось извлечь текст из файла")
-            chunks = _chunk_text(text_content)
-            # Store total upfront so UI can show X / N progress
-            try:
-                async with db_module.async_session_factory() as s:
-                    await s.execute(
-                        text("UPDATE ingest_jobs SET chunks_total=:n WHERE id=:id"),
-                        {"n": len(chunks), "id": job_id},
-                    )
-                    await s.commit()
-            except Exception:
-                pass
-            # progress_cb called every _PROCESS_BATCH chunks inside _upsert_bilingual_chunks
-            chunks_total = await _upsert_bilingual_chunks(
-                chunks, collection, file_topic, llm_router, source_lang, progress_cb=_progress
-            )
-
-        async with db_module.async_session_factory() as session:
-            await session.execute(
-                text("UPDATE ingest_jobs SET status='done', chunks_added=:n, updated_at=now() WHERE id=:id"),
-                {"n": chunks_total, "id": job_id},
-            )
-            await session.commit()
-        logger.info("admin.kb.ingest_job_done", job_id=job_id, chunks=chunks_total)
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        raise
-    except Exception as exc:
-        error_msg = getattr(exc, "detail", None) or str(exc)
-        async with db_module.async_session_factory() as session:
-            await session.execute(
-                text("UPDATE ingest_jobs SET status='error', error=:e, updated_at=now() WHERE id=:id"),
-                {"e": str(error_msg)[:500], "id": job_id},
-            )
-            await session.commit()
-        logger.error("admin.kb.ingest_job_error", job_id=job_id, error=str(error_msg))
 
 
 @router.post("/kb/jobs/{job_id}/cancel", dependencies=[Depends(_verify_token)])
@@ -855,26 +823,88 @@ async def delete_ingest_job(job_id: str):
 
 @router.post("/kb/jobs/{job_id}/retry", dependencies=[Depends(_verify_token)])
 async def retry_ingest_job(job_id: str, request: Request):
+    import os
     queue = getattr(request.app.state, "ingest_queue", None)
     if queue is None:
         raise HTTPException(503, "Очередь загрузок не инициализирована")
+
     async with db_module.async_session_factory() as session:
         row = (await session.execute(
-            text("SELECT file_data FROM ingest_jobs WHERE id=:id AND status IN ('error', 'done')"),
+            text("SELECT tmp_path, status FROM ingest_jobs WHERE id=:id"),
             {"id": job_id},
         )).fetchone()
         if not row:
-            raise HTTPException(404, "Задача не найдена или ещё выполняется")
-        if not row.file_data:
-            raise HTTPException(400, "Нет сохранённых данных файла для повтора")
-        await session.execute(
-            text("UPDATE ingest_jobs SET status='queued', error=NULL, chunks_done=0, "
-                 "updated_at=now() WHERE id=:id"),
-            {"id": job_id},
-        )
-        await session.commit()
+            raise HTTPException(404, "Задача не найдена")
+        if row.status == "running":
+            raise HTTPException(409, "Задача выполняется")
+        if row.status == "done":
+            raise HTTPException(409, "Задача уже завершена")
+
+        # Check for pending chunks — smart embed-only resume
+        pending_count = (await session.execute(
+            text("SELECT COUNT(*) FROM ingest_chunks WHERE job_id=:jid AND chunk_status='pending'"),
+            {"jid": job_id},
+        )).scalar() or 0
+
+        if pending_count > 0:
+            # Resume from embed stage: keep all chunks and files intact, only re-embed pending ones.
+            # Already-done chunks are already in Qdrant — no duplication, no wasted tokens.
+            await session.execute(
+                text(
+                    "UPDATE ingest_jobs SET status='queued', stage='embed', error=NULL, "
+                    "updated_at=now() WHERE id=:id"
+                ),
+                {"id": job_id},
+            )
+            await session.commit()
+        else:
+            # No pending chunks: full retry from scratch (re-extract, re-chunk, re-embed)
+            tmp_path = row.tmp_path
+            if not tmp_path or not os.path.exists(tmp_path):
+                raise HTTPException(
+                    409,
+                    "Файл удалён после завершения задачи. Загрузите файл заново."
+                )
+            await session.execute(
+                text("DELETE FROM ingest_chunks WHERE job_id=:jid"),
+                {"jid": job_id},
+            )
+            await session.execute(
+                text("DELETE FROM ingest_files WHERE job_id=:jid"),
+                {"jid": job_id},
+            )
+            await session.execute(
+                text(
+                    "UPDATE ingest_jobs SET status='queued', stage='upload', error=NULL, "
+                    "chunks_done=0, chunks_total=0, files_total=0, files_extracted=0, "
+                    "files_chunked=0, enrichment_total=0, enrichment_done=0, qdrant_upserted=0, "
+                    "updated_at=now() WHERE id=:id"
+                ),
+                {"id": job_id},
+            )
+            await session.commit()
+
     await queue.put(job_id)
-    return {"ok": True, "status": "queued"}
+    mode = "embed_resume" if pending_count > 0 else "full_retry"
+    return {"ok": True, "status": "queued", "mode": mode, "pending_chunks": pending_count}
+
+
+def _calc_percent(status: str, stage: str, files_total: int, files_extracted: int,
+                  files_chunked: int, chunks_total: int, chunks_done: int) -> int:
+    """Multi-stage progress: extract 0-30%, chunk 30-60%, embed 60-100%."""
+    if status == "done":
+        return 100
+    if stage in ("cleanup",):
+        return 98
+    ft = max(files_total, 1)
+    if stage == "extract":
+        return 5 + int(files_extracted / ft * 25)
+    if stage == "chunk":
+        return 30 + int(files_chunked / ft * 30)
+    if stage == "embed":
+        ct = max(chunks_total, 1)
+        return 60 + int(chunks_done / ct * 39)
+    return 2  # upload / queued
 
 
 @router.get("/kb/jobs", dependencies=[Depends(_verify_token)])
@@ -882,8 +912,10 @@ async def get_ingest_jobs():
     async with db_module.async_session_factory() as session:
         rows = (await session.execute(
             text(
-                "SELECT id, status, filename, collection, chunks_added, error, "
-                "created_at, updated_at, chunks_done, chunks_total "
+                "SELECT id, status, stage, filename, collection, chunks_added, error, "
+                "created_at, updated_at, chunks_done, chunks_total, "
+                "files_total, files_extracted, files_chunked, "
+                "enrichment_total, enrichment_done, qdrant_upserted, tier "
                 "FROM ingest_jobs "
                 "WHERE status != 'done' OR updated_at > now() - interval '10 minutes' "
                 "ORDER BY created_at DESC LIMIT 50"
@@ -891,12 +923,97 @@ async def get_ingest_jobs():
         )).fetchall()
     return [
         {
-            "id": r[0], "status": r[1], "filename": r[2], "collection": r[3],
-            "chunks_added": r[4], "error": r[5],
-            "created_at": r[6].isoformat() if r[6] else "",
-            "updated_at": r[7].isoformat() if r[7] else "",
-            "chunks_done": r[8] or 0,
-            "chunks_total": r[9] or 0,
+            "id": r[0], "status": r[1], "stage": r[2] or "upload",
+            "filename": r[3], "collection": r[4],
+            "chunks_added": r[5], "error": r[6],
+            "created_at": r[7].isoformat() if r[7] else "",
+            "updated_at": r[8].isoformat() if r[8] else "",
+            "chunks_done": r[9] or 0, "chunks_total": r[10] or 0,
+            "files_total": r[11] or 0, "files_extracted": r[12] or 0,
+            "files_chunked": r[13] or 0,
+            "enrichment_total": r[14] or 0, "enrichment_done": r[15] or 0,
+            "qdrant_upserted": r[16] or 0, "tier": r[17],
+            "percent": _calc_percent(
+                r[1], r[2] or "upload",
+                r[11] or 0, r[12] or 0, r[13] or 0,
+                r[10] or 0, r[9] or 0,
+            ),
+        }
+        for r in rows
+    ]
+
+
+@router.get("/kb/jobs/{job_id}/progress", dependencies=[Depends(_verify_token)])
+async def get_ingest_job_progress(job_id: str):
+    async with db_module.async_session_factory() as session:
+        row = (await session.execute(
+            text(
+                "SELECT id, status, stage, filename, collection, chunks_added, error, "
+                "created_at, updated_at, chunks_done, chunks_total, "
+                "files_total, files_extracted, files_chunked, "
+                "enrichment_total, enrichment_done, qdrant_upserted, tier "
+                "FROM ingest_jobs WHERE id=:jid"
+            ),
+            {"jid": job_id},
+        )).fetchone()
+    if not row:
+        raise HTTPException(404, "Задача не найдена")
+
+    chunks_done = row[9] or 0
+    chunks_total = row[10] or 0
+
+    # Compute speed from recent DB history (simple: chunks_done / elapsed_s)
+    speed_cps = 0.0
+    eta_seconds = None
+    if row[7] and chunks_done > 0 and chunks_total > 0:
+        elapsed = (row[8] - row[7]).total_seconds() if row[8] and row[7] else 1
+        if elapsed > 0:
+            speed_cps = round(chunks_done / elapsed, 1)
+            remaining = chunks_total - chunks_done
+            if speed_cps > 0:
+                eta_seconds = int(remaining / speed_cps)
+
+    return {
+        "job_id": row[0],
+        "status": row[1],
+        "stage": row[2] or "upload",
+        "filename": row[3],
+        "collection": row[4],
+        "files_total": row[11] or 0,
+        "files_extracted": row[12] or 0,
+        "files_chunked": row[13] or 0,
+        "enrichment_total": row[14] or 0,
+        "enrichment_done": row[15] or 0,
+        "chunks_total": chunks_total,
+        "chunks_done": chunks_done,
+        "qdrant_upserted": row[16] or 0,
+        "tier": row[17],
+        "speed_cps": speed_cps,
+        "eta_seconds": eta_seconds,
+        "error": row[6],
+        "percent": _calc_percent(
+            row[1], row[2] or "upload",
+            row[11] or 0, row[12] or 0, row[13] or 0,
+            chunks_total, chunks_done,
+        ),
+    }
+
+
+@router.get("/kb/jobs/{job_id}/logs", dependencies=[Depends(_verify_token)])
+async def get_ingest_job_logs(job_id: str, limit: int = 100, level: str = "all"):
+    async with db_module.async_session_factory() as session:
+        q = "SELECT id, level, stage, message, details, created_at FROM ingest_logs WHERE job_id=:jid"
+        params: dict = {"jid": job_id}
+        if level != "all":
+            q += " AND level=:lv"
+            params["lv"] = level
+        q += " ORDER BY created_at DESC LIMIT :lim"
+        params["lim"] = limit
+        rows = (await session.execute(text(q), params)).fetchall()
+    return [
+        {
+            "id": r[0], "level": r[1], "stage": r[2], "message": r[3],
+            "details": r[4], "created_at": r[5].isoformat() if r[5] else "",
         }
         for r in rows
     ]
@@ -1077,57 +1194,7 @@ def _url_to_topic(url: str) -> str:
     return path.replace("-", " ").replace("_", " ")[:80]
 
 
-_UPSERT_BATCH = 200          # Qdrant points per upsert call
-_TRANSLATE_BATCH = 30        # chunks per single LLM translation call
-_PROCESS_BATCH = 300         # chunks per progress-update cycle
-_ZIP_FILE_CONCURRENCY = 5    # parallel files processed from ZIP
-
-# Global semaphore for concurrent translation calls across ALL workers and jobs.
-# Auto-calibrated from live x-ratelimit-limit-tokens header; re-checked every hour.
-# Formula: TPM / 60s * avg_call_latency_s / tokens_per_batch
-#   tokens_per_batch = _TRANSLATE_BATCH * ~433 tokens/chunk ≈ 13,000
-#   avg_latency ≈ 3s  →  concurrent = TPM * 3 / 780_000
-_GLOBAL_TRANSLATE_SEM: asyncio.Semaphore = asyncio.Semaphore(8)  # conservative default
-_GLOBAL_TRANSLATE_SEM_SIZE: int = 8   # tracks configured limit (avoid accessing ._value)
-_SEM_LAST_CHECKED: float = 0.0
-_SEM_CHECK_INTERVAL: float = 3600.0   # re-probe once per hour
-
-
-def _get_translate_sem() -> asyncio.Semaphore:
-    return _GLOBAL_TRANSLATE_SEM
-
-
-async def _maybe_refresh_translate_sem() -> None:
-    """Probe OpenAI for actual TPM limit and rebuild semaphore if tier changed."""
-    global _GLOBAL_TRANSLATE_SEM, _GLOBAL_TRANSLATE_SEM_SIZE, _SEM_LAST_CHECKED
-    now = time.monotonic()
-    if now - _SEM_LAST_CHECKED < _SEM_CHECK_INTERVAL:
-        return
-    _SEM_LAST_CHECKED = now  # set before any await — prevents concurrent probes in same loop tick
-
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        return
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
-            )
-        tpm = int(resp.headers.get("x-ratelimit-limit-tokens", 0))
-        rpm = int(resp.headers.get("x-ratelimit-limit-requests", 0))
-        if tpm > 0:
-            # Stay within TPM: each batch ≈ 13k tokens, ~3s per call
-            concurrent = max(2, min(50, tpm * 3 // 780_000))
-            if _GLOBAL_TRANSLATE_SEM_SIZE != concurrent:
-                _GLOBAL_TRANSLATE_SEM = asyncio.Semaphore(concurrent)
-                _GLOBAL_TRANSLATE_SEM_SIZE = concurrent
-                logger.info("translate_sem.updated", tpm=tpm, rpm=rpm, concurrent=concurrent)
-            else:
-                logger.info("translate_sem.unchanged", tpm=tpm, rpm=rpm, concurrent=concurrent)
-    except Exception:
-        logger.warning("translate_sem.probe_failed")
+_UPSERT_BATCH = 200          # Qdrant points per upsert call (used by URL/dataset ingest)
 
 
 _DATA_EXTENSIONS = {".json", ".jsonl", ".csv", ".txt", ".md"}
@@ -1206,7 +1273,7 @@ async def _ingest_hf_dataset(repo_id: str, body, llm_router) -> int:
 
         entries = _records_to_entries(rows_collected, prefix, body.question_field, body.answer_field)
         src_lang = getattr(body, "source_lang", "auto")
-        count = await _upsert_bilingual_entries(entries, body.collection, llm_router, src_lang)
+        count = await _upsert_entries_simple(entries, body.collection, llm_router, src_lang)
         total += count
         logger.info("admin.kb.hf_split", repo=repo_id, config=config, split=split, added=count)
 
@@ -1390,7 +1457,7 @@ async def _ingest_repo_zip(zip_bytes: bytes, body, llm_router, repo_name: str) -
                 chunks = _chunk_text(text)
                 if body.limit:
                     chunks = chunks[:body.limit]
-                total += await _upsert_bilingual_chunks(chunks, body.collection, file_prefix, llm_router, src_lang)
+                total += await _upsert_chunks_simple(chunks, body.collection, file_prefix, llm_router, src_lang)
                 continue
 
             records = _parse_records_from_bytes(raw_data, basename)
@@ -1405,7 +1472,7 @@ async def _ingest_repo_zip(zip_bytes: bytes, body, llm_router, repo_name: str) -
             if not entries:
                 continue
 
-            count = await _upsert_bilingual_entries(entries, body.collection, llm_router, src_lang)
+            count = await _upsert_entries_simple(entries, body.collection, llm_router, src_lang)
             total += count
             logger.info("admin.kb.repo_file_ingested", file=rel_path, added=count)
 
@@ -1508,7 +1575,7 @@ async def kb_ingest_dataset(body: KBDatasetIngestRequest, request: Request):
                    f"Укажи вручную ПОЛЕ ВОПРОСА и ПОЛЕ ОТВЕТА.",
         )
 
-    count = await _upsert_bilingual_entries(entries, body.collection, llm_router, body.source_lang)
+    count = await _upsert_entries_simple(entries, body.collection, llm_router, body.source_lang)
     logger.info("admin.kb.ingest_dataset", collection=body.collection, url=url, count=count)
     return KBIngestResult(chunks_added=count, collection=body.collection, source=url)
 
@@ -1560,239 +1627,58 @@ def _detect_lang(text: str) -> str:
     return "ru" if cyrillic / max(len(sample), 1) > 0.20 else "en"
 
 
-async def _llm_translate_to(text: str, target_lang: str, llm_router) -> str:
-    """Translate a single text. Returns original if already in target lang or on error."""
-    if _detect_lang(text) == target_lang:
-        return text
-    system = (
-        "Переведи текст на русский язык. Сохрани структуру и психологические термины. "
-        "Верни ТОЛЬКО перевод без пояснений."
-        if target_lang == "ru" else
-        "Translate the text to English. Preserve structure and psychological terms. "
-        "Return ONLY the translation without explanations."
-    )
-    try:
-        return await llm_router.call(
-            task_kind="intent_classify",
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": text[:3000]}],
-            max_tokens=1500,
-            temperature=0.1,
-        )
-    except Exception:
-        return text
-
-
-def _parse_numbered_translations(text: str, expected: int) -> list[str]:
-    """Parse [1]...[N] numbered format from LLM batch-translate response."""
-    import re
-    parts = re.split(r'\n?\[(\d+)\]\s*', text)
-    result: dict[int, str] = {}
-    i = 1
-    while i < len(parts) - 1:
-        try:
-            n = int(parts[i])
-            content = parts[i + 1].strip()
-            if 1 <= n <= expected:
-                result[n] = content
-        except (ValueError, IndexError):
-            pass
-        i += 2
-    return [result.get(i, "") for i in range(1, expected + 1)]
-
-
-async def _batch_translate_texts(texts: list[str], target_lang: str, llm_router) -> list[str]:
-    """Translate texts in parallel batches of _TRANSLATE_BATCH, up to _TRANSLATE_CONCURRENCY concurrent.
-
-    gpt-4o-mini limits (Tier 1): 500 RPM, 200k TPM.
-    Each batch of 30 chunks ≈ 13k tokens I/O → up to 5 parallel = 65k tokens/wave,
-    completing in ~3s → well within 200k TPM.
-    """
-    if not texts:
-        return []
-
-    already = [_detect_lang(t) == target_lang for t in texts]
-    need_indices = [i for i, a in enumerate(already) if not a]
-    if not need_indices:
-        return list(texts)
-
-    system = (
-        "Переведи каждый пронумерованный фрагмент на русский язык. "
-        "Сохрани психологические термины. Формат ответа строго: [N] перевод. Только переводы, без пояснений."
-        if target_lang == "ru" else
-        "Translate each numbered fragment to English. "
-        "Preserve psychological terms. Reply strictly: [N] translation. Only translations."
-    )
-
-    results = list(texts)
-    texts_to_translate = [texts[i] for i in need_indices]
-    batches = [
-        texts_to_translate[s:s + _TRANSLATE_BATCH]
-        for s in range(0, len(texts_to_translate), _TRANSLATE_BATCH)
-    ]
-
-    sem = _get_translate_sem()  # global across all workers/jobs
-
-    async def _translate_one_batch(batch_idx: int, batch: list[str]) -> tuple[int, list[str]]:
-        async with sem:
-            numbered = "\n\n".join(f"[{j + 1}] {t[:2000]}" for j, t in enumerate(batch))
-            # Allow enough tokens for full output: ~350 tokens per chunk
-            max_out = min(15000, len(batch) * 400)
-            parsed: list[str] = []
-            try:
-                response = await llm_router.call(
-                    task_kind="intent_classify",
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": numbered},
-                    ],
-                    max_tokens=max_out,
-                    temperature=0.1,
-                )
-                parsed = _parse_numbered_translations(response, len(batch))
-            except Exception:
-                pass
-
-            non_empty = sum(1 for p in parsed if p)
-            if non_empty >= len(batch) * 0.7:
-                return batch_idx, [p if p else orig for p, orig in zip(parsed, batch)]
-
-            # Fallback: individual calls with limited concurrency
-            ind_sem = asyncio.Semaphore(4)
-            async def _tr_one(t: str) -> str:
-                async with ind_sem:
-                    return await _llm_translate_to(t, target_lang, llm_router)
-            individual = await asyncio.gather(*[_tr_one(t) for t in batch])
-            return batch_idx, list(individual)
-
-    batch_results = await asyncio.gather(*[_translate_one_batch(i, b) for i, b in enumerate(batches)])
-    batch_results = sorted(batch_results, key=lambda x: x[0])
-
-    translated_all: list[str] = []
-    for _, tr_list in batch_results:
-        translated_all.extend(tr_list)
-
-    for rel_i, abs_i in enumerate(need_indices):
-        results[abs_i] = translated_all[rel_i]
-
-    return results
-
-
-async def _upsert_bilingual_chunks(
-    chunks: list[str], collection: str, topic: str, llm_router,
-    source_lang: str = "auto", progress_cb=None, chunk_offset: int = 0,
+async def _upsert_chunks_simple(
+    chunks: list[str], collection: str, topic: str, llm_router, source_lang: str = "auto",
 ) -> int:
-    """Upsert chunks in original + translated language.
-
-    Pipeline: translation of batch[i+1] runs concurrently with embedding of batch[i].
-    Qdrant upserts run in parallel within each batch.
-    Embedding uses batch_size=500 (text-embedding-3-large: 2048 inputs / 300k tokens per call).
-    """
+    """Embed and upsert chunks without translation (v2 URL/dataset ingest)."""
     if not chunks:
         return 0
-
-    sample = " ".join(chunks[:3])
-    lang = source_lang if source_lang in ("ru", "en") else _detect_lang(sample)
-    target_lang = "en" if lang == "ru" else "ru"
-    n_chunks = len(chunks)
-
-    sub_batches = [chunks[s:s + _PROCESS_BATCH] for s in range(0, n_chunks, _PROCESS_BATCH)]
-
+    await _ensure_collection(collection)
+    from mirror.services.ingest.extractor import detect_lang as _det_lang
+    lang = source_lang if source_lang in ("ru", "en") else _det_lang(" ".join(chunks[:3]))
     client = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
-    total_added = 0
-    # Defined before try so finally can always cancel it on error
-    pending_tr: asyncio.Task | None = None
+    total = 0
     try:
-        # Lookahead: start translating batch 0 before the loop
-        pending_tr = asyncio.create_task(
-            _batch_translate_texts(sub_batches[0], target_lang, llm_router)
-        )
-
-        for i, sub in enumerate(sub_batches):
-            batch_start = i * _PROCESS_BATCH
-            sub_topics = [
-                f"{topic} (часть {chunk_offset + batch_start + j + 1})" if n_chunks > 1 else topic
-                for j in range(len(sub))
-            ]
-
-            # Await translation of current batch (already running)
-            translated = await pending_tr
-            pending_tr = None
-
-            # Immediately kick off translation of NEXT batch (pipeline)
-            if i + 1 < len(sub_batches):
-                pending_tr = asyncio.create_task(
-                    _batch_translate_texts(sub_batches[i + 1], target_lang, llm_router)
-                )
-
-            orig_texts = [f"{t}\n{c}" for t, c in zip(sub_topics, sub)]
-            tr_texts   = [f"{t}\n{c}" for t, c in zip(sub_topics, translated)]
-            # batch_size=500: up to 300k tokens per call, 5x fewer API calls vs default 100
-            all_embs = await llm_router.embed_batch(orig_texts + tr_texts, batch_size=500)
-
-            points = [
-                PointStruct(id=str(uuid_module.uuid4()), vector=emb,
-                            payload={"topic": t, "text": c, "collection": collection, "lang": lang})
-                for t, c, emb in zip(sub_topics, sub, all_embs[:len(sub)])
-            ] + [
-                PointStruct(id=str(uuid_module.uuid4()), vector=emb,
-                            payload={"topic": t, "text": c, "collection": collection, "lang": target_lang})
-                for t, c, emb in zip(sub_topics, translated, all_embs[len(sub):])
-            ]
-
-            # Parallel Qdrant upserts
-            await asyncio.gather(*[
-                client.upsert(collection_name=collection, points=points[s:s + _UPSERT_BATCH])
-                for s in range(0, len(points), _UPSERT_BATCH)
-            ])
-
-            total_added += len(sub)
-            if progress_cb:
-                await progress_cb(len(sub))
+        texts = [f"{topic}\n{c}" for c in chunks]
+        all_embs = await llm_router.embed_batch(texts, batch_size=500)
+        points = [
+            PointStruct(id=str(uuid_module.uuid4()), vector=emb,
+                        payload={"topic": topic, "text": c, "collection": collection, "lang": lang})
+            for c, emb in zip(chunks, all_embs)
+        ]
+        for i in range(0, len(points), _UPSERT_BATCH):
+            await client.upsert(collection_name=collection, points=points[i:i + _UPSERT_BATCH])
+        total = len(chunks)
     finally:
-        # Cancel any in-flight lookahead translate task to avoid leaking API calls
-        if pending_tr is not None and not pending_tr.done():
-            pending_tr.cancel()
-            try:
-                await pending_tr
-            except (asyncio.CancelledError, Exception):
-                pass
         await client.close()
+    return total
 
-    return total_added
 
 
-async def _upsert_bilingual_entries(
-    entries: list[dict], collection: str, llm_router, source_lang: str = "auto"
+
+async def _upsert_entries_simple(
+    entries: list[dict], collection: str, llm_router, source_lang: str = "auto",
 ) -> int:
-    """Upsert entries in original + translated form. Returns original entry count."""
+    """Embed and upsert KB entries (with per-entry topics) without translation."""
     if not entries:
         return 0
-
+    await _ensure_collection(collection)
+    from mirror.services.ingest.extractor import detect_lang as _det_lang
     sample = " ".join(e["text"][:200] for e in entries[:3])
-    lang = source_lang if source_lang in ("ru", "en") else _detect_lang(sample)
-    target_lang = "en" if lang == "ru" else "ru"
-
+    lang = source_lang if source_lang in ("ru", "en") else _det_lang(sample)
     topics = [e["topic"] for e in entries]
-    orig_texts = [e["text"] for e in entries]
-    translated_texts = await _batch_translate_texts(orig_texts, target_lang, llm_router)
-
-    all_topics = topics + topics
-    all_texts  = orig_texts + translated_texts
-    all_langs  = [lang] * len(entries) + [target_lang] * len(entries)
-    all_embs = await llm_router.embed_batch(
-        [f"{t}\n{tx}" for t, tx in zip(all_topics, all_texts)], batch_size=500
-    )
-
-    all_points = [
+    texts = [e["text"] for e in entries]
+    embed_inputs = [f"{t}\n{tx}" for t, tx in zip(topics, texts)]
+    all_embs = await llm_router.embed_batch(embed_inputs, batch_size=500)
+    points = [
         PointStruct(id=str(uuid_module.uuid4()), vector=emb,
-                    payload={"topic": t, "text": tx, "collection": collection, "lang": l})
-        for t, tx, emb, l in zip(all_topics, all_texts, all_embs, all_langs)
+                    payload={"topic": t, "text": tx, "collection": collection, "lang": lang})
+        for t, tx, emb in zip(topics, texts, all_embs)
     ]
-
     qdrant = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
     try:
-        for i in range(0, len(all_points), _UPSERT_BATCH):
-            await qdrant.upsert(collection_name=collection, points=all_points[i:i + _UPSERT_BATCH])
+        for i in range(0, len(points), _UPSERT_BATCH):
+            await qdrant.upsert(collection_name=collection, points=points[i:i + _UPSERT_BATCH])
     finally:
         await qdrant.close()
     return len(entries)
@@ -1814,60 +1700,3 @@ async def _ensure_collection(name: str) -> None:
         await client.close()
 
 
-async def _ingest_zip(data: bytes, collection: str, base_topic: str, llm_router, source_lang: str = "auto",
-                      progress_cb=None, set_total_cb=None) -> int:
-    """Ingest all files from a ZIP archive.
-
-    Files are processed in parallel (_ZIP_FILE_CONCURRENCY at a time).
-    If the ZIP contains top-level folders starting with ``knowledge_``, each folder
-    is routed to its own collection automatically.
-    """
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            # Pre-create any collection referenced by folder names
-            folder_collections = {
-                parts[0]
-                for name in zf.namelist()
-                if not name.endswith("/") and not name.startswith("__MACOSX")
-                for parts in [name.split("/")]
-                if len(parts) > 1 and parts[0].startswith("knowledge_")
-            }
-            for col in folder_collections:
-                await _ensure_collection(col)
-
-            # Phase 1: read + extract + chunk synchronously — gives us total before embed
-            file_jobs: list[tuple[str, str, list[str]]] = []  # (collection, topic, chunks)
-            for name in zf.namelist():
-                if name.endswith("/") or name.startswith("__MACOSX"):
-                    continue
-                parts = name.split("/")
-                filename = parts[-1]
-                if not filename:
-                    continue
-                target_col = parts[0] if len(parts) > 1 and parts[0].startswith("knowledge_") else collection
-                book_name = filename.rsplit(".", 1)[0]
-                file_topic = f"{base_topic} / {book_name}" if base_topic else book_name
-                raw = zf.read(name)
-                text_content = _extract_text_from_bytes(raw, filename=filename)
-                if not text_content.strip():
-                    continue
-                file_jobs.append((target_col, file_topic, _chunk_text(text_content)))
-    except zipfile.BadZipFile as e:
-        raise HTTPException(status_code=400, detail=f"Некорректный ZIP: {e}")
-
-    # Report total chunks so progress bar can show X / N
-    total_chunks = sum(len(ch) for _, _, ch in file_jobs)
-    if set_total_cb and total_chunks:
-        await set_total_cb(total_chunks)
-
-    # Phase 2: embed + upsert in parallel
-    sem = asyncio.Semaphore(_ZIP_FILE_CONCURRENCY)
-
-    async def _process_file(col: str, topic: str, chunks: list[str]) -> int:
-        async with sem:
-            return await _upsert_bilingual_chunks(
-                chunks, col, topic, llm_router, source_lang, progress_cb=progress_cb,
-            )
-
-    results = await asyncio.gather(*[_process_file(c, t, ch) for c, t, ch in file_jobs])
-    return sum(results)

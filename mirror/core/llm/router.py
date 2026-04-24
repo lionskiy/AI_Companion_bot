@@ -97,7 +97,7 @@ class LLMRouter:
         return results[0]
 
     async def embed_batch(self, texts: list[str], batch_size: int = 100) -> list[list[float]]:
-        """Embed multiple texts with batched API calls and retry on timeout."""
+        """Embed multiple texts with batched API calls, retry on timeout and rate limit."""
         if not texts:
             return []
         routing = await self._get_routing("embedding", "*")
@@ -110,9 +110,14 @@ class LLMRouter:
             for attempt in range(3):
                 try:
                     resp = await client.embeddings.create(model=routing.model_id, input=batch)
-                    # API returns embeddings in the same order as input
                     all_embeddings.extend(e.embedding for e in sorted(resp.data, key=lambda x: x.index))
                     break
+                except OpenAIRateLimitError:
+                    if attempt < 2:
+                        # Rate limit window is 60s; back off substantially before retrying
+                        await asyncio.sleep(30.0 * (attempt + 1))
+                        continue
+                    raise
                 except OpenAITimeoutError:
                     if attempt < 2:
                         await asyncio.sleep(2.0 * (attempt + 1))
