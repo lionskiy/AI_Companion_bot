@@ -959,11 +959,12 @@ async function loadLLMKeys() {
       <button class="btn btn-sm btn-outline-danger px-2" onclick="deleteLLMKey('${id}')" title="Удалить ключ"><i class="bi bi-trash3"></i></button>
     </div>`;
   }).join('') : '<p style="font-size:.82rem;color:#8b949e">Ключи не заданы</p>';
-  // Populate add-form dropdown with providers that have no key set
+  // Populate add-form dropdown with ALL providers; mark already-set ones
   const setIds = new Set(setList.map(([k]) => k));
-  const unset = Object.keys(_llmProvidersMeta).filter(p => !setIds.has(p));
   const sel = document.getElementById('new-llm-provider');
-  if (sel) sel.innerHTML = unset.map(p => `<option value="${p}">${_llmProvidersMeta[p].label}</option>`).join('');
+  if (sel) sel.innerHTML = Object.keys(_llmProvidersMeta).map(p =>
+    `<option value="${p}">${_llmProvidersMeta[p].label}${setIds.has(p) ? ' ✓' : ''}</option>`
+  ).join('');
 }
 
 async function saveLLMKey(provider) {
