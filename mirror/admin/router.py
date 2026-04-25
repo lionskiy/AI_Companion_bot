@@ -287,9 +287,31 @@ def _ensure_tg_bots(app_state) -> list:
     return app_state.tg_bots
 
 
+async def _bot_polling_loop(bot, dp) -> None:
+    """Custom polling loop for bots added at runtime.
+
+    dp.start_polling() has lifecycle state and can't be called twice on the
+    same dispatcher. This loop uses low-level get_updates + feed_update instead.
+    """
+    offset = 0
+    logger.info("tg_bot.polling_loop_started", bot_id=bot.id if hasattr(bot, "id") else "?")
+    while True:
+        try:
+            updates = await bot.get_updates(offset=offset, timeout=30, limit=100,
+                                            allowed_updates=dp.resolve_used_update_types())
+            for update in updates:
+                await dp.feed_update(bot, update)
+                offset = update.update_id + 1
+        except asyncio.CancelledError:
+            logger.info("tg_bot.polling_loop_stopped")
+            break
+        except Exception as e:
+            logger.warning("tg_bot.polling_error", error=str(e))
+            await asyncio.sleep(1)
+
+
 async def _do_register_bot(request: Request, name: str, token: str) -> dict:
     """Validate token, connect bot (webhook or polling), add/update entry in tg_bots."""
-    import asyncio
     from aiogram import Bot as AiogramBot
     from aiogram.client.default import DefaultBotProperties
     try:
@@ -302,16 +324,14 @@ async def _do_register_bot(request: Request, name: str, token: str) -> dict:
     if settings.polling_mode:
         dp = getattr(request.app.state, "dp", None)
         if dp:
-            polling_task = asyncio.create_task(
-                dp.start_polling(new_bot, handle_signals=False)
-            )
+            polling_task = asyncio.create_task(_bot_polling_loop(new_bot, dp))
     else:
         _secret = settings.telegram_webhook_secret.get_secret_value()
         webhook_url = f"{settings.base_url}/webhook/telegram/{me.id}/{_secret}"
         await new_bot.set_webhook(webhook_url, secret_token=_secret)
 
     bots = _ensure_tg_bots(request.app.state)
-    # Cancel old polling task for same bot if re-registering
+    # Cancel old polling task if re-registering same bot
     old = next((b for b in bots if b["name"] == name or b.get("tg_id") == me.id), None)
     if old and old.get("polling_task"):
         old["polling_task"].cancel()
