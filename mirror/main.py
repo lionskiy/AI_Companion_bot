@@ -150,8 +150,97 @@ async def lifespan(app: FastAPI):
     app.state.bot = bot
     app.state.dp = dp
 
+    # ── Load / seed TG bots from DB ──────────────────────────────────────────
+    from mirror.models.telegram import TgBot as TgBotModel
+    from mirror.admin.router import _bot_polling_loop
+
+    _secret = settings.telegram_webhook_secret.get_secret_value()
+
+    async def _connect_bot(entry_bot, entry_name, entry_token, entry_tg_id):
+        """Set webhook or start polling for one bot. Returns updated entry dict."""
+        polling_task = None
+        if settings.polling_mode:
+            polling_task = asyncio.create_task(_bot_polling_loop(entry_bot, dp))
+        else:
+            if entry_tg_id:
+                wh_url = f"{settings.base_url}/webhook/telegram/{entry_tg_id}/{_secret}"
+            else:
+                wh_url = f"{settings.base_url}/webhook/telegram/{_secret}"
+            try:
+                await entry_bot.set_webhook(wh_url, secret_token=_secret)
+            except Exception as e:
+                logger.warning("telegram.set_webhook_failed", name=entry_name, error=str(e))
+        return polling_task
+
+    # Resolve initial bot's Telegram ID
+    _bot_tg_id: int | None = None
+    _bot_username: str | None = None
+    try:
+        _me = await bot.get_me()
+        _bot_tg_id = _me.id
+        _bot_username = _me.username
+    except Exception as e:
+        logger.warning("telegram.get_me_failed", error=str(e))
+
+    # Seed initial bot into DB if not present
+    async with db_module.async_session_factory() as _s:
+        _existing = (await _s.execute(
+            sa_text("SELECT name FROM tg_bots WHERE name='Основной' OR tg_id=:tid"),
+            {"tid": _bot_tg_id},
+        )).fetchone()
+        if not _existing:
+            await _s.execute(
+                sa_text("INSERT INTO tg_bots (name, token, username, tg_id) "
+                        "VALUES ('Основной', :tok, :un, :tid) ON CONFLICT DO NOTHING"),
+                {"tok": settings.telegram_bot_token.get_secret_value(),
+                 "un": _bot_username, "tid": _bot_tg_id},
+            )
+            await _s.commit()
+        else:
+            # Update username/tg_id if resolved
+            if _bot_tg_id:
+                await _s.execute(
+                    sa_text("UPDATE tg_bots SET username=:un, tg_id=:tid WHERE name='Основной'"),
+                    {"un": _bot_username, "tid": _bot_tg_id},
+                )
+                await _s.commit()
+
+    # Load all bots from DB and connect them
+    app.state.tg_bots = []
+    async with db_module.async_session_factory() as _s:
+        _db_bots = (await _s.execute(
+            sa_text("SELECT name, token, username, tg_id FROM tg_bots ORDER BY created_at")
+        )).fetchall()
+
+    for _row in _db_bots:
+        _bname, _btoken, _busername, _btg_id = _row
+        if _btoken == settings.telegram_bot_token.get_secret_value() and _btg_id == _bot_tg_id:
+            # Reuse already-created startup bot object
+            _bobj = bot
+        else:
+            try:
+                from aiogram import Bot as _ABot
+                from aiogram.client.default import DefaultBotProperties as _DBP
+                _bobj = _ABot(token=_btoken, default=_DBP(parse_mode=None))
+                _bme = await _bobj.get_me()
+                _busername = _bme.username
+                _btg_id = _bme.id
+            except Exception as _e:
+                logger.warning("telegram.bot_connect_failed", name=_bname, error=str(_e))
+                continue
+
+        _ptask = await _connect_bot(_bobj, _bname, _btoken, _btg_id)
+        app.state.tg_bots.append({
+            "name": _bname, "token": _btoken, "username": _busername,
+            "tg_id": _btg_id, "bot_obj": _bobj, "active": True,
+            "polling_task": _ptask,
+        })
+        logger.info("telegram.bot_connected", name=_bname, username=_busername)
+
+    app.state.bot = bot  # keep primary bot reference
+
     if settings.polling_mode:
-        # Long polling — не нужен публичный URL
+        # Main bot already connected via _connect_bot above; start the named poller for logs
         try:
             await bot.delete_webhook(drop_pending_updates=True)
         except Exception as e:
@@ -159,18 +248,9 @@ async def lifespan(app: FastAPI):
         _polling_task = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
         logger.info("telegram.polling_started")
     else:
-        # Webhook mode
         from mirror.channels.telegram.webhook import make_webhook_router
-        webhook_url = (
-            f"{settings.base_url}/webhook/telegram/"
-            f"{settings.telegram_webhook_secret.get_secret_value()}"
-        )
-        await bot.set_webhook(
-            webhook_url,
-            secret_token=settings.telegram_webhook_secret.get_secret_value(),
-        )
         app.include_router(make_webhook_router(dp, bot))
-        logger.info("telegram.webhook_set", url=webhook_url.split("/webhook")[0] + "/webhook/...")
+        logger.info("telegram.webhook_ready")
 
     # ── Reset zombie ingest jobs from previous run ────────────────────────────
     try:

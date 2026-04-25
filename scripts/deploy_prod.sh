@@ -5,11 +5,27 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# ── Настройки сервера (заполнить) ────────────────────────────────
-PROD_HOST="YOUR_SERVER_IP"
-PROD_USER="YOUR_SSH_USER"
+# ── Настройки сервера ────────────────────────────────────────────
+PROD_HOST="176.57.221.9"
+PROD_USER="root"
 PROD_DIR="/opt/mirror"
+PROD_PASS="${PROD_PASS:-}"  # передавать через env: PROD_PASS=... ./scripts/deploy_prod.sh
 # ─────────────────────────────────────────────────────────────────
+
+_ssh() {
+  if [ -n "$PROD_PASS" ]; then
+    sshpass -p "$PROD_PASS" ssh -o StrictHostKeyChecking=no "$@"
+  else
+    ssh -o StrictHostKeyChecking=no "$@"
+  fi
+}
+_ssh_remote() {
+  if [ -n "$PROD_PASS" ]; then
+    sshpass -p "$PROD_PASS" ssh -o StrictHostKeyChecking=no "${PROD_USER}@${PROD_HOST}" bash -s
+  else
+    ssh -o StrictHostKeyChecking=no "${PROD_USER}@${PROD_HOST}" bash -s
+  fi
+}
 
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
@@ -34,7 +50,7 @@ echo "==> Возврат в new_features..."
 git checkout new_features
 
 echo "==> SSH деплой на ${PROD_USER}@${PROD_HOST}:${PROD_DIR}..."
-ssh "${PROD_USER}@${PROD_HOST}" bash <<REMOTE
+_ssh_remote <<REMOTE
   set -euo pipefail
   cd "${PROD_DIR}"
 

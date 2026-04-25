@@ -198,42 +198,245 @@ async def update_routing(task_kind: str, body: LLMRoutingUpdate):
     )
 
 
-# ── API keys ──────────────────────────────────────────────────────────────────
+# ── LLM API keys ──────────────────────────────────────────────────────────────
 
-_API_KEY_VARS = {
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
+_LLM_PROVIDERS: dict[str, dict] = {
+    "openai":     {"label": "OpenAI",         "env": "OPENAI_API_KEY",       "color": "#10a37f", "placeholder": "sk-..."},
+    "anthropic":  {"label": "Anthropic",       "env": "ANTHROPIC_API_KEY",    "color": "#d97706", "placeholder": "sk-ant-..."},
+    "google":     {"label": "Google Gemini",   "env": "GOOGLE_API_KEY",       "color": "#4285f4", "placeholder": "AIza..."},
+    "mistral":    {"label": "Mistral AI",      "env": "MISTRAL_API_KEY",      "color": "#ff7000", "placeholder": "..."},
+    "groq":       {"label": "Groq",            "env": "GROQ_API_KEY",         "color": "#f55036", "placeholder": "gsk_..."},
+    "cohere":     {"label": "Cohere",          "env": "COHERE_API_KEY",       "color": "#39594d", "placeholder": "..."},
+    "together":   {"label": "Together AI",     "env": "TOGETHER_API_KEY",     "color": "#7c3aed", "placeholder": "..."},
+    "perplexity": {"label": "Perplexity",      "env": "PERPLEXITY_API_KEY",   "color": "#20b2aa", "placeholder": "pplx-..."},
+    "xai":        {"label": "xAI (Grok)",      "env": "XAI_API_KEY",          "color": "#888888", "placeholder": "xai-..."},
+    "deepseek":   {"label": "DeepSeek",        "env": "DEEPSEEK_API_KEY",     "color": "#4169e1", "placeholder": "sk-..."},
+    "azure":      {"label": "Azure OpenAI",    "env": "AZURE_OPENAI_API_KEY", "color": "#0089d6", "placeholder": "..."},
+    "ollama":     {"label": "Ollama (local)",  "env": "OLLAMA_BASE_URL",      "color": "#666666", "placeholder": "http://localhost:11434"},
 }
+
+
+def _mask_key(val: str) -> str:
+    if not val:
+        return ""
+    return val[:8] + "..." + val[-4:] if len(val) > 12 else "****"
 
 
 @router.get("/llm-keys", dependencies=[Depends(_verify_token)])
 async def get_llm_keys():
-    """Return masked API keys from env + app_config override."""
     result = {}
-    for provider, env_var in _API_KEY_VARS.items():
-        val = os.environ.get(env_var, "")
-        if val:
-            result[provider] = val[:8] + "..." + val[-4:] if len(val) > 12 else "****"
-        else:
-            result[provider] = ""
-    return result
+    for provider, meta in _LLM_PROVIDERS.items():
+        val = os.environ.get(meta["env"], "")
+        result[provider] = _mask_key(val) if val else ""
+    return {
+        "keys": result,
+        "providers": {k: {"label": v["label"], "color": v["color"], "placeholder": v["placeholder"]}
+                      for k, v in _LLM_PROVIDERS.items()},
+    }
 
 
 @router.put("/llm-keys/{provider}", dependencies=[Depends(_verify_token)])
 async def set_llm_key(provider: str, request: Request):
     body = await request.json()
     key = body.get("key", "").strip()
-    if provider not in _API_KEY_VARS:
+    if provider not in _LLM_PROVIDERS:
         raise HTTPException(400, f"Unknown provider: {provider!r}")
     if not key:
         raise HTTPException(400, "key must not be empty")
-    env_var = _API_KEY_VARS[provider]
-    os.environ[env_var] = key
+    os.environ[_LLM_PROVIDERS[provider]["env"]] = key
     from mirror.core.llm.router import LLMRouter
     LLMRouter._routing_cache.clear()
     LLMRouter._provider_cache.clear()
     logger.info("admin.llm_key.updated", provider=provider)
-    return {"updated": provider, "set": True}
+    return {"updated": provider}
+
+
+@router.delete("/llm-keys/{provider}", dependencies=[Depends(_verify_token)])
+async def delete_llm_key(provider: str):
+    if provider not in _LLM_PROVIDERS:
+        raise HTTPException(400, f"Unknown provider: {provider!r}")
+    env_var = _LLM_PROVIDERS[provider]["env"]
+    os.environ.pop(env_var, None)
+    from mirror.core.llm.router import LLMRouter
+    LLMRouter._routing_cache.clear()
+    LLMRouter._provider_cache.clear()
+    logger.info("admin.llm_key.deleted", provider=provider)
+    return {"deleted": provider}
+
+
+# ── Telegram bots ─────────────────────────────────────────────────────────────
+
+def _mask_tg_token(token: str) -> str:
+    if not token:
+        return ""
+    colon = token.find(":")
+    return (token[:colon + 5] + "..." + token[-4:]) if colon > 0 else _mask_key(token)
+
+
+def _ensure_tg_bots(app_state) -> list:
+    if not hasattr(app_state, "tg_bots"):
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "") or settings.telegram_bot_token.get_secret_value()
+        if token:
+            from aiogram import Bot as AiogramBot
+            from aiogram.client.default import DefaultBotProperties
+            bot_obj = AiogramBot(token=token, default=DefaultBotProperties(parse_mode=None))
+            app_state.tg_bots = [{"name": "Основной", "token": token, "username": None,
+                                   "tg_id": None, "bot_obj": bot_obj, "active": True}]
+        else:
+            app_state.tg_bots = []
+    return app_state.tg_bots
+
+
+async def _bot_polling_loop(bot, dp) -> None:
+    """Custom polling loop for bots added at runtime.
+
+    dp.start_polling() has lifecycle state and can't be called twice on the
+    same dispatcher. This loop uses low-level get_updates + feed_update instead.
+    """
+    offset = 0
+    logger.info("tg_bot.polling_loop_started", bot_id=bot.id if hasattr(bot, "id") else "?")
+    while True:
+        try:
+            updates = await bot.get_updates(offset=offset, timeout=30, limit=100,
+                                            allowed_updates=dp.resolve_used_update_types())
+            for update in updates:
+                await dp.feed_update(bot, update)
+                offset = update.update_id + 1
+        except asyncio.CancelledError:
+            logger.info("tg_bot.polling_loop_stopped")
+            break
+        except Exception as e:
+            logger.warning("tg_bot.polling_error", error=str(e))
+            await asyncio.sleep(1)
+
+
+async def _do_register_bot(request: Request, name: str, token: str) -> dict:
+    """Validate token, connect bot (webhook or polling), add/update entry in tg_bots."""
+    from aiogram import Bot as AiogramBot
+    from aiogram.client.default import DefaultBotProperties
+    try:
+        new_bot = AiogramBot(token=token, default=DefaultBotProperties(parse_mode=None))
+        me = await new_bot.get_me()
+    except Exception as e:
+        raise HTTPException(400, f"Telegram отверг токен: {e}")
+
+    polling_task = None
+    if settings.polling_mode:
+        dp = getattr(request.app.state, "dp", None)
+        if dp:
+            polling_task = asyncio.create_task(_bot_polling_loop(new_bot, dp))
+    else:
+        _secret = settings.telegram_webhook_secret.get_secret_value()
+        webhook_url = f"{settings.base_url}/webhook/telegram/{me.id}/{_secret}"
+        await new_bot.set_webhook(webhook_url, secret_token=_secret)
+
+    bots = _ensure_tg_bots(request.app.state)
+    # Cancel old polling task if re-registering same bot
+    old = next((b for b in bots if b["name"] == name or b.get("tg_id") == me.id), None)
+    if old and old.get("polling_task"):
+        old["polling_task"].cancel()
+    # Remove stale entries with same name or tg_id
+    request.app.state.tg_bots = [
+        b for b in bots if b["name"] != name and b.get("tg_id") != me.id
+    ]
+    request.app.state.tg_bots.append({
+        "name": name, "token": token, "username": me.username,
+        "tg_id": me.id, "bot_obj": new_bot, "active": True,
+        "polling_task": polling_task,
+    })
+    request.app.state.bot = new_bot
+    return {"username": me.username, "id": me.id}
+
+
+@router.get("/tg-bots", dependencies=[Depends(_verify_token)])
+async def list_tg_bots(request: Request):
+    bots = _ensure_tg_bots(request.app.state)
+    return {"bots": [
+        {"name": b["name"], "masked": _mask_tg_token(b["token"]),
+         "username": b.get("username"), "active": b.get("active", True),
+         "tg_id": b.get("tg_id")}
+        for b in bots
+    ]}
+
+
+@router.post("/tg-bots", dependencies=[Depends(_verify_token)])
+async def add_tg_bot(request: Request):
+    body = await request.json()
+    name = body.get("name", "").strip()
+    token = body.get("token", "").strip()
+    if not name:
+        raise HTTPException(400, "Укажи название бота")
+    if not token or ":" not in token:
+        raise HTTPException(400, "Некорректный токен")
+    bots = _ensure_tg_bots(request.app.state)
+    if any(b["name"] == name for b in bots):
+        raise HTTPException(400, f"Бот '{name}' уже существует")
+    info = await _do_register_bot(request, name, token)
+    async with db_module.async_session_factory() as session:
+        await session.execute(
+            text("INSERT INTO tg_bots (name, token, username, tg_id) "
+                 "VALUES (:name, :tok, :un, :tid) "
+                 "ON CONFLICT (name) DO UPDATE SET token=:tok, username=:un, tg_id=:tid"),
+            {"name": name, "tok": token, "un": info["username"], "tid": info["id"]},
+        )
+        await session.commit()
+    logger.info("admin.tg_bot.added", name=name, username=info["username"])
+    return {"added": True, "activated": True, "username": info["username"]}
+
+
+@router.put("/tg-bots/{name}/activate", dependencies=[Depends(_verify_token)])
+async def activate_tg_bot(name: str, request: Request):
+    """Re-register webhook for a bot (useful if webhook was lost)."""
+    bots = _ensure_tg_bots(request.app.state)
+    entry = next((b for b in bots if b["name"] == name), None)
+    if not entry:
+        raise HTTPException(404, "Бот не найден")
+    info = await _do_register_bot(request, name, entry["token"])
+    async with db_module.async_session_factory() as session:
+        await session.execute(
+            text("UPDATE tg_bots SET username=:un, tg_id=:tid WHERE name=:name"),
+            {"un": info["username"], "tid": info["id"], "name": name},
+        )
+        await session.commit()
+    logger.info("admin.tg_bot.reactivated", name=name, username=info["username"])
+    return {"activated": True, "username": info["username"]}
+
+
+@router.delete("/tg-bots/{name}", dependencies=[Depends(_verify_token)])
+async def remove_tg_bot(name: str, request: Request):
+    bots = _ensure_tg_bots(request.app.state)
+    entry = next((b for b in bots if b["name"] == name), None)
+    if not entry:
+        raise HTTPException(404, "Бот не найден")
+    # Stop polling task (polling mode)
+    polling_task = entry.get("polling_task")
+    if polling_task:
+        polling_task.cancel()
+        try:
+            await polling_task
+        except Exception:
+            pass
+    bot_obj = entry.get("bot_obj")
+    if bot_obj:
+        try:
+            await bot_obj.delete_webhook(drop_pending_updates=False)
+        except Exception:
+            pass
+        try:
+            await bot_obj.session.close()
+        except Exception:
+            pass
+    request.app.state.tg_bots = [b for b in bots if b["name"] != name]
+    # If deleted bot was app.state.bot, switch to next available
+    if bot_obj and bot_obj is getattr(request.app.state, "bot", None):
+        remaining = request.app.state.tg_bots
+        if remaining:
+            request.app.state.bot = remaining[-1].get("bot_obj") or request.app.state.bot
+    async with db_module.async_session_factory() as session:
+        await session.execute(text("DELETE FROM tg_bots WHERE name=:name"), {"name": name})
+        await session.commit()
+    logger.info("admin.tg_bot.removed", name=name)
+    return {"removed": True}
 
 
 # ── LLM model lists ───────────────────────────────────────────────────────────

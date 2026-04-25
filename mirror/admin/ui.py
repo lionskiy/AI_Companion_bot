@@ -214,15 +214,60 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
       <button class="btn btn-outline-secondary btn-sm" onclick="refreshSection('routing')"><i class="bi bi-arrow-clockwise"></i> Обновить</button>
     </div>
 
-    <!-- API Keys -->
-    <div class="card mb-4">
-      <div class="card-header p-3"><i class="bi bi-key"></i> API-ключи провайдеров</div>
-      <div class="card-body">
-        <p style="font-size:.82rem;color:#8b949e;margin-bottom:1rem">Ключи хранятся только в памяти процесса до перезапуска. Для постоянного хранения пропишите в <code>.env</code>.</p>
-        <div class="row g-3" id="api-keys-row">
-          <!-- populated by JS -->
+    <!-- Keys 2-col -->
+    <div class="row g-4 mb-4">
+
+      <!-- LEFT: LLM providers -->
+      <div class="col-md-6">
+        <div class="card h-100">
+          <div class="card-header p-3 d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-key"></i> API-ключи LLM провайдеров</span>
+            <button class="btn btn-sm btn-outline-secondary" onclick="showAddLLMForm()"><i class="bi bi-plus-lg"></i> Добавить</button>
+          </div>
+          <div class="card-body">
+            <p style="font-size:.8rem;color:#8b949e;margin-bottom:.75rem">Ключи хранятся в памяти процесса — действуют до перезапуска. Для постоянства пропишите в <code>.env</code>.</p>
+            <div id="llm-keys-list"></div>
+            <div id="add-llm-form" style="display:none;margin-top:.75rem;padding:.75rem;border:1px solid #30363d;border-radius:8px">
+              <div class="mb-2">
+                <select class="form-select form-select-sm" id="new-llm-provider"></select>
+              </div>
+              <div class="input-group input-group-sm">
+                <input type="password" class="form-control" id="new-llm-key" placeholder="API ключ..." autocomplete="new-password">
+                <button class="btn btn-primary btn-sm" onclick="saveNewLLMKey()">Добавить</button>
+                <button class="btn btn-outline-secondary btn-sm" onclick="hideAddLLMForm()">✕</button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
+
+      <!-- RIGHT: Telegram bots -->
+      <div class="col-md-6">
+        <div class="card h-100">
+          <div class="card-header p-3 d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-telegram"></i> Telegram боты</span>
+            <button class="btn btn-sm btn-outline-secondary" onclick="showAddTgForm()"><i class="bi bi-plus-lg"></i> Добавить бота</button>
+          </div>
+          <div class="card-body">
+            <p style="font-size:.8rem;color:#8b949e;margin-bottom:.75rem">Все добавленные боты работают параллельно и сохраняются в БД — восстанавливаются автоматически после перезапуска.</p>
+            <div id="tg-bots-list"></div>
+            <div id="add-tg-form" style="display:none;margin-top:.75rem;padding:.75rem;border:1px solid #30363d;border-radius:8px">
+              <div class="mb-2">
+                <input type="text" class="form-control form-control-sm" id="new-tg-name" placeholder="Название (например: Prod Bot)">
+              </div>
+              <div class="input-group input-group-sm mb-2">
+                <input type="password" class="form-control" id="new-tg-token" placeholder="123456789:ABCdef..." autocomplete="new-password">
+              </div>
+              <div class="d-flex gap-2">
+                <button class="btn btn-primary btn-sm" onclick="addTgBot()"><i class="bi bi-plus-lg"></i> Добавить и подключить</button>
+                <button class="btn btn-outline-secondary btn-sm ms-auto" onclick="hideAddTgForm()">✕</button>
+              </div>
+              <div id="add-tg-result" style="font-size:.8rem;margin-top:.5rem"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <!-- Routing table -->
@@ -837,6 +882,7 @@ function _buildModelSelect(id, models, currentValue, style='') {
 
 async function loadRouting() {
   loadLLMKeys();
+  loadTgBots();
   // Only fetch model lists if cache is empty
   const needOAI = !_modelCache.openai.length;
   const needAnt = !_modelCache.anthropic.length;
@@ -893,41 +939,150 @@ async function _setProvider(kind, provider) {
   if (cell) cell.innerHTML = _buildModelSelect('r-model-' + kind, models, currentModel);
 }
 
+// ── LLM keys ──────────────────────────────────────────────────────────────────
+let _llmProvidersMeta = {};
+
 async function loadLLMKeys() {
-  const keys = await apiGet('/admin/llm-keys');
-  if (!keys) return;
-  const providers = [
-    {id:'openai', label:'OpenAI', placeholder:'sk-...', color:'#10a37f'},
-    {id:'anthropic', label:'Anthropic', placeholder:'sk-ant-...', color:'#d97706'},
-  ];
-  document.getElementById('api-keys-row').innerHTML = providers.map(p => `
-    <div class="col-md-6">
-      <div class="card p-3" style="border-color:#2d3748">
-        <div class="d-flex align-items-center gap-2 mb-2">
-          <span style="font-size:.8rem;font-weight:600;color:${p.color}">${p.label}</span>
-          <span id="key-status-${p.id}" style="font-size:.75rem;color:${keys[p.id]?'#4ade80':'#f87171'}">${keys[p.id]?'● Ключ задан':'● Не задан'}</span>
-        </div>
-        ${keys[p.id]?`<div style="font-size:.78rem;color:#8b949e;font-family:monospace;margin-bottom:.5rem">${keys[p.id]}</div>`:''}
-        <div class="input-group input-group-sm">
-          <input type="password" class="form-control" id="key-input-${p.id}" placeholder="${p.placeholder}" autocomplete="new-password">
-          <button class="btn btn-outline-secondary" onclick="saveLLMKey('${p.id}')">Сохранить</button>
-        </div>
-      </div>
-    </div>`).join('');
+  const data = await apiGet('/admin/llm-keys');
+  if (!data) return;
+  _llmProvidersMeta = data.providers || {};
+  const keys = data.keys || {};
+  const setList = Object.entries(keys).filter(([,v]) => v);
+  document.getElementById('llm-keys-list').innerHTML = setList.length ? setList.map(([id, masked]) => {
+    const m = _llmProvidersMeta[id] || {label: id, color: '#888', placeholder: '...'};
+    return `<div class="d-flex align-items-center gap-2 mb-2 px-2 py-2" style="border:1px solid #2d3748;border-radius:8px;min-height:38px">
+      <span style="font-size:.75rem;font-weight:600;color:${m.color};min-width:110px">${m.label}</span>
+      <span style="font-size:.72rem;color:#4ade80">●</span>
+      <span style="font-size:.72rem;color:#8b949e;font-family:monospace;flex:1;overflow:hidden;text-overflow:ellipsis">${masked}</span>
+      <input type="password" class="form-control form-control-sm" id="key-input-${id}" placeholder="${m.placeholder}" style="max-width:140px" autocomplete="new-password">
+      <button class="btn btn-sm btn-outline-secondary px-2" onclick="saveLLMKey('${id}')" title="Обновить ключ"><i class="bi bi-cloud-upload"></i></button>
+      <button class="btn btn-sm btn-outline-danger px-2" onclick="deleteLLMKey('${id}')" title="Удалить ключ"><i class="bi bi-trash3"></i></button>
+    </div>`;
+  }).join('') : '<p style="font-size:.82rem;color:#8b949e">Ключи не заданы</p>';
+  // Populate add-form dropdown with ALL providers; mark already-set ones
+  const setIds = new Set(setList.map(([k]) => k));
+  const sel = document.getElementById('new-llm-provider');
+  if (sel) sel.innerHTML = Object.keys(_llmProvidersMeta).map(p =>
+    `<option value="${p}">${_llmProvidersMeta[p].label}${setIds.has(p) ? ' ✓' : ''}</option>`
+  ).join('');
 }
 
 async function saveLLMKey(provider) {
-  const key = document.getElementById('key-input-' + provider).value.trim();
+  const inp = document.getElementById('key-input-' + provider);
+  const key = inp ? inp.value.trim() : '';
   if (!key) { toast('Введи ключ', false); return; }
   try {
     await fetch('/admin/llm-keys/' + provider, {
-      method: 'PUT',
-      headers: {'Content-Type':'application/json','X-Admin-Token': TOKEN},
-      body: JSON.stringify({key})
+      method: 'PUT', headers: {'Content-Type':'application/json','X-Admin-Token': TOKEN},
+      body: JSON.stringify({key}),
     });
-    toast('Ключ сохранён для ' + provider);
-    document.getElementById('key-input-' + provider).value = '';
+    toast('Ключ сохранён: ' + (_llmProvidersMeta[provider]?.label || provider));
+    if (inp) inp.value = '';
     loadLLMKeys();
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+function showAddLLMForm() { document.getElementById('add-llm-form').style.display = ''; }
+function hideAddLLMForm() { document.getElementById('add-llm-form').style.display = 'none'; }
+
+async function saveNewLLMKey() {
+  const provider = document.getElementById('new-llm-provider').value;
+  const key = document.getElementById('new-llm-key').value.trim();
+  if (!provider) { toast('Выбери провайдера', false); return; }
+  if (!key) { toast('Введи ключ', false); return; }
+  try {
+    await fetch('/admin/llm-keys/' + provider, {
+      method: 'PUT', headers: {'Content-Type':'application/json','X-Admin-Token': TOKEN},
+      body: JSON.stringify({key}),
+    });
+    toast('Ключ добавлен: ' + (_llmProvidersMeta[provider]?.label || provider));
+    document.getElementById('new-llm-key').value = '';
+    hideAddLLMForm();
+    loadLLMKeys();
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+async function deleteLLMKey(provider) {
+  const label = _llmProvidersMeta[provider]?.label || provider;
+  if (!confirm(`Удалить ключ ${label}? Провайдер станет недоступен до следующей установки.`)) return;
+  try {
+    const r = await fetch('/admin/llm-keys/' + provider, {
+      method: 'DELETE', headers: {'X-Admin-Token': TOKEN},
+    });
+    const data = await r.json();
+    if (!r.ok) { toast('✗ ' + (data.detail || 'Ошибка'), false); return; }
+    toast('Ключ удалён: ' + label);
+    loadLLMKeys();
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+// ── Telegram bots ─────────────────────────────────────────────────────────────
+async function loadTgBots() {
+  const data = await apiGet('/admin/tg-bots');
+  if (!data) return;
+  const bots = data.bots || [];
+  document.getElementById('tg-bots-list').innerHTML = bots.length ? bots.map(b => `
+    <div class="d-flex align-items-center gap-2 mb-2 px-2 py-2" style="border:1px solid #2a3a5c;border-radius:8px;min-height:40px">
+      <span title="Подключён" style="font-size:1rem;color:#4ade80">●</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:.78rem;font-weight:600;color:#e6edf3">${b.name}${b.username?` <span style="font-weight:400;color:#8b949e">@${b.username}</span>`:''}</div>
+        <div style="font-size:.7rem;color:#6e7681;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.masked}${b.tg_id?` · ID: ${b.tg_id}`:''}</div>
+      </div>
+      <button class="btn btn-sm btn-outline-secondary px-2" onclick="reconnectTgBot('${b.name}')" title="Переподключить webhook"><i class="bi bi-arrow-repeat"></i></button>
+      <button class="btn btn-sm btn-outline-danger px-2" onclick="removeTgBot('${b.name}')" title="Удалить бота"><i class="bi bi-trash3"></i></button>
+    </div>`).join('') : '<p style="font-size:.82rem;color:#8b949e">Нет подключённых ботов</p>';
+}
+
+function showAddTgForm() { document.getElementById('add-tg-form').style.display = ''; }
+function hideAddTgForm() {
+  document.getElementById('add-tg-form').style.display = 'none';
+  document.getElementById('add-tg-result').textContent = '';
+  document.getElementById('new-tg-name').value = '';
+  document.getElementById('new-tg-token').value = '';
+}
+
+async function addTgBot() {
+  const name = document.getElementById('new-tg-name').value.trim();
+  const token = document.getElementById('new-tg-token').value.trim();
+  const res = document.getElementById('add-tg-result');
+  if (!name) { res.textContent = '✗ Укажи название'; res.style.color = '#f87171'; return; }
+  if (!token) { res.textContent = '✗ Укажи токен'; res.style.color = '#f87171'; return; }
+  res.textContent = 'Проверяем токен...'; res.style.color = '#8b949e';
+  try {
+    const r = await fetch('/admin/tg-bots', {
+      method: 'POST', headers: {'Content-Type':'application/json','X-Admin-Token': TOKEN},
+      body: JSON.stringify({name, token}),
+    });
+    const data = await r.json();
+    if (!r.ok) { res.textContent = '✗ ' + (data.detail || 'Ошибка'); res.style.color = '#f87171'; return; }
+    res.textContent = `✓ @${data.username} подключён`;
+    res.style.color = '#4ade80';
+    setTimeout(() => { hideAddTgForm(); loadTgBots(); }, 1200);
+  } catch(e) { res.textContent = '✗ ' + e.message; res.style.color = '#f87171'; }
+}
+
+async function reconnectTgBot(name) {
+  try {
+    const r = await fetch('/admin/tg-bots/' + encodeURIComponent(name) + '/activate', {
+      method: 'PUT', headers: {'X-Admin-Token': TOKEN},
+    });
+    const data = await r.json();
+    if (!r.ok) { toast('✗ ' + (data.detail || 'Ошибка'), false); return; }
+    toast(`✓ Webhook переподключён: @${data.username}`);
+    loadTgBots();
+  } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+async function removeTgBot(name) {
+  if (!confirm(`Удалить бота "${name}"?\nWebhook будет отключён, бот перестанет получать сообщения.`)) return;
+  try {
+    const r = await fetch('/admin/tg-bots/' + encodeURIComponent(name), {
+      method: 'DELETE', headers: {'X-Admin-Token': TOKEN},
+    });
+    const data = await r.json();
+    if (!r.ok) { toast('✗ ' + (data.detail || 'Ошибка'), false); return; }
+    toast('Бот отключён и удалён');
+    loadTgBots();
   } catch(e) { toast('Ошибка: ' + e.message, false); }
 }
 
