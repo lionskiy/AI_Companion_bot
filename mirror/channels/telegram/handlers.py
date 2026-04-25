@@ -53,10 +53,13 @@ async def typing_action(bot: Bot, chat_id: int):
 
 
 def make_handlers_router(adapter, dialog_service, bot: Bot) -> Router:
+    # `bot` parameter kept for signature compat but handlers receive the active
+    # bot via aiogram DI (whatever was passed to dp.feed_update), so multi-bot
+    # operation works correctly — each bot replies through its own token.
     router = Router()
 
     @router.message(CommandStart())
-    async def handle_start(message: Message) -> None:
+    async def handle_start(message: Message, bot: Bot) -> None:
         unified = await adapter.to_unified(message, is_new_start=True)
         async with typing_action(bot, message.chat.id):
             response = await dialog_service.handle(unified)
@@ -67,7 +70,7 @@ def make_handlers_router(adapter, dialog_service, bot: Bot) -> Router:
         await message.answer(HELP_TEXT)
 
     @router.message(Command("quiet"))
-    async def handle_quiet(message: Message) -> None:
+    async def handle_quiet(message: Message, bot: Bot) -> None:
         unified = await adapter.to_unified(message)
         unified.text = "/quiet"
         async with typing_action(bot, message.chat.id):
@@ -75,7 +78,7 @@ def make_handlers_router(adapter, dialog_service, bot: Bot) -> Router:
         await adapter.send(response, bot)
 
     @router.message(Command("active"))
-    async def handle_active(message: Message) -> None:
+    async def handle_active(message: Message, bot: Bot) -> None:
         unified = await adapter.to_unified(message)
         unified.text = "/active"
         async with typing_action(bot, message.chat.id):
@@ -83,7 +86,7 @@ def make_handlers_router(adapter, dialog_service, bot: Bot) -> Router:
         await adapter.send(response, bot)
 
     @router.message()
-    async def handle_message(message: Message) -> None:
+    async def handle_message(message: Message, bot: Bot) -> None:
         try:
             unified = await adapter.to_unified(message)
             async with typing_action(bot, message.chat.id):
@@ -101,7 +104,7 @@ def make_handlers_router(adapter, dialog_service, bot: Bot) -> Router:
             await message.answer("Что-то пошло не так, попробуй ещё раз 🙏")
 
     @router.callback_query(lambda c: c.data and c.data.startswith("action:"))
-    async def handle_callback(callback: CallbackQuery) -> None:
+    async def handle_callback(callback: CallbackQuery, bot: Bot) -> None:
         action = callback.data.removeprefix("action:")
         unified = await adapter.callback_to_unified(callback, action)
         async with typing_action(bot, callback.message.chat.id):
