@@ -43,6 +43,8 @@ from mirror.models.user import UserProfile
 from mirror.services.billing import invalidate_quota_cache
 from mirror.services.dialog import invalidate_app_config_cache
 
+from pydantic import BaseModel
+
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -51,6 +53,22 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 def _verify_token(x_admin_token: str = Header(...)):
     if x_admin_token != settings.admin_token.get_secret_value():
         raise HTTPException(status_code=403, detail="Forbidden")
+
+
+class _LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@router.post("/login")
+async def admin_login(body: _LoginRequest):
+    ok = (
+        body.username == settings.admin_username
+        and body.password == settings.admin_password.get_secret_value()
+    )
+    if not ok:
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    return {"token": settings.admin_token.get_secret_value()}
 
 
 # ── app_config ────────────────────────────────────────────────────────────────

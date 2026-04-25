@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.redis import RedisStorage
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from mirror.config import settings
@@ -224,6 +224,11 @@ from mirror.admin.router import router as admin_router  # noqa: E402
 from mirror.admin.ui import ui_router as admin_ui_router  # noqa: E402
 app.include_router(admin_router)
 app.include_router(admin_ui_router)
+
+
+@app.get("/")
+async def root_redirect():
+    return RedirectResponse(url="/admin/ui/")
 
 
 @app.get("/health")

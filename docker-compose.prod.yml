@@ -91,9 +91,6 @@ services:
         condition: service_started
 
   celery_worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: mirror_api:latest
     restart: unless-stopped
     command: celery -A mirror.workers.celery_app worker --loglevel=info --concurrency=2
@@ -113,9 +110,6 @@ services:
         condition: service_healthy
 
   celery_beat:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: mirror_api:latest
     restart: unless-stopped
     command: celery -A mirror.workers.celery_app beat --loglevel=info

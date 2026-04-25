@@ -116,9 +116,10 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
 <div id="login-screen">
   <div class="login-box">
     <h4 class="mb-1"><i class="bi bi-shield-lock"></i> Mirror Admin</h4>
-    <p class="text-secondary mb-4" style="font-size:.85rem">Введи admin token для входа</p>
+    <p class="text-secondary mb-4" style="font-size:.85rem">Введи логин и пароль</p>
     <div class="mb-3">
-      <input type="password" id="token-input" class="form-control" placeholder="admin token" autocomplete="off">
+      <input type="text" id="login-input" class="form-control mb-2" placeholder="Логин" autocomplete="username">
+      <input type="password" id="password-input" class="form-control" placeholder="Пароль" autocomplete="current-password">
     </div>
     <button class="btn btn-primary w-100" onclick="doLogin()">Войти</button>
     <div id="login-error" class="text-danger mt-2" style="font-size:.85rem"></div>
@@ -556,13 +557,25 @@ const KB_COLLECTIONS = ['knowledge_tarot', 'knowledge_astro', 'knowledge_psych']
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 async function doLogin() {
-  TOKEN = document.getElementById('token-input').value.trim();
-  const ok = await apiGet('/admin/stats');
-  if (ok) { sessionStorage.setItem('admin_token', TOKEN); showApp(); }
-  else { document.getElementById('login-error').textContent = 'Неверный токен'; }
+  const username = document.getElementById('login-input').value.trim();
+  const password = document.getElementById('password-input').value;
+  const errEl = document.getElementById('login-error');
+  errEl.textContent = '';
+  try {
+    const res = await fetch(API + '/admin/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, password}),
+    });
+    if (!res.ok) { errEl.textContent = 'Неверный логин или пароль'; return; }
+    const data = await res.json();
+    TOKEN = data.token;
+    sessionStorage.setItem('admin_token', TOKEN);
+    showApp();
+  } catch(e) { errEl.textContent = 'Ошибка соединения'; }
 }
 function logout() { sessionStorage.removeItem('admin_token'); location.reload(); }
-document.getElementById('token-input').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+document.getElementById('password-input').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
 
 function showApp() {
   document.getElementById('login-screen').style.display = 'none';
