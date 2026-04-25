@@ -35,6 +35,8 @@ class Settings(BaseSettings):
 
     # Admin
     admin_token: SecretStr
+    admin_username: str = "admin"
+    admin_password: SecretStr = SecretStr("admin")
 
     # Polling mode for local dev (no public URL needed)
     polling_mode: bool = False
