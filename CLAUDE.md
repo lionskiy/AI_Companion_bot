@@ -117,16 +117,57 @@ Telegram (aiogram) → ChannelAdapter → UnifiedMessage → DialogService → U
 
 ---
 
-## Деплой
+## Ветки (обязательно соблюдать)
 
+| Ветка | Назначение |
+|---|---|
+| `main` | Последняя стабильная (релизная) версия. Только merge из `new_features`. |
+| `new_features` | Вся разработка: правки, фичи, эксперименты. |
+
+**Правило старта:** В начале каждой сессии/задачи — проверить текущую ветку.
+- Если не `new_features` → `git checkout new_features` (или `git checkout -b new_features origin/main` если ветки нет).
+- Никогда не коммитить напрямую в `main`.
+
+---
+
+## CI/CD — команды деплоя
+
+### "деплой на стейдж" / "задеплой локально"
+Пересобрать и перезапустить локальный Docker для проверки:
+```bash
+./scripts/stage.sh
 ```
-Локально: git push → GitHub Actions → staging (порт 8100, авто)
-Прод (порт 8000): только по явной команде "лей на прод"
-Сервер: /opt/mirror
+- Запускает `docker compose -f docker-compose.dev.yml up -d --build`
+- Прогоняет `alembic upgrade head`
+- **НЕ коммитит автоматически** — после команды спросить: "Закоммитить текущие изменения в `new_features`?"
+
+### "комит в новые фичи" / "закоммить" / "залей в new_features"
+Сохранить текущие изменения в ветку `new_features`:
+```bash
+git add <изменённые файлы>
+git commit -m "..."
+git push origin new_features
 ```
 
-- Агент НЕ запускает docker-команды локально
-- .env.prod меняется только на сервере
+### "деплой на прод" / "деплой на бой" / "лей на прод"
+Слить `new_features` в `main` и задеплоить на сервер:
+```bash
+./scripts/deploy_prod.sh
+```
+Скрипт делает:
+1. Проверяет что мы в `new_features` и нет незакоммиченных изменений
+2. `git merge new_features → main` + `git push origin main`
+3. SSH на сервер: `git pull` + `docker compose -f docker-compose.prod.yml up -d --build` + миграции
+
+### Сервер
+```
+Хост: YOUR_SERVER_IP (заполнить в scripts/deploy_prod.sh)
+Пользователь: YOUR_SSH_USER
+Путь: /opt/mirror
+Порт prod: 8000 (за Nginx, снаружи 443)
+```
+- `.env.prod` хранится только на сервере, никогда не коммитится
+- Первый деплой на сервер: запустить `./scripts/ssl_init.sh email domain` для SSL
 
 ---
 

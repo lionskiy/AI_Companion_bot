@@ -1,0 +1,137 @@
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    restart: unless-stopped
+    command: ["--js", "-m", "8222"]
+
+  # ── Application ─────────────────────────────────────────────────
+  # Reverse proxy: системный Nginx на сервере, не Docker.
+  # mirror_api слушает 127.0.0.1:8000, Nginx проксирует soul.aibotovod.ru → 127.0.0.1:8000
+
+  mirror_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mirror_api:latest
+    restart: unless-stopped
+    command: ["uvicorn", "mirror.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file: .env.prod
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      NATS_URL: nats://nats:4222
+      BASE_URL: https://${PROD_DOMAIN}
+      POLLING_MODE: "false"
+    volumes:
+      - ingest_data:/data/ingest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      nats:
+        condition: service_started
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mirror_api:latest
+    restart: unless-stopped
+    command: celery -A mirror.workers.celery_app worker --loglevel=info --concurrency=2
+    env_file: .env.prod
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      NATS_URL: nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mirror_api:latest
+    restart: unless-stopped
+    command: celery -A mirror.workers.celery_app beat --loglevel=info
+    env_file: .env.prod
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:
+  rabbitmq_data:
+  ingest_data:
