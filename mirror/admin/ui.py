@@ -225,6 +225,30 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
       </div>
     </div>
 
+    <!-- Telegram Bot Token -->
+    <div class="card mb-4">
+      <div class="card-header p-3"><i class="bi bi-telegram"></i> Telegram Bot</div>
+      <div class="card-body">
+        <p style="font-size:.82rem;color:#8b949e;margin-bottom:1rem">Смена токена применяется мгновенно — бот переключается без перезапуска. Для постоянного хранения пропишите в <code>.env</code>.</p>
+        <div class="row g-3">
+          <div class="col-md-8">
+            <div class="card p-3" style="border-color:#2d3748">
+              <div class="d-flex align-items-center gap-2 mb-2">
+                <span style="font-size:.8rem;font-weight:600;color:#229ed9">Bot Token</span>
+                <span id="tg-token-status" style="font-size:.75rem;color:#8b949e">...</span>
+              </div>
+              <div id="tg-token-current" style="font-size:.78rem;color:#8b949e;font-family:monospace;margin-bottom:.5rem"></div>
+              <div class="input-group input-group-sm">
+                <input type="password" class="form-control" id="tg-token-input" placeholder="123456789:ABCdef..." autocomplete="new-password">
+                <button class="btn btn-outline-secondary" onclick="saveTgToken()">Сохранить</button>
+              </div>
+              <div id="tg-token-result" style="font-size:.8rem;margin-top:.5rem"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Routing table -->
     <div class="card">
       <div class="card-header p-3 d-flex justify-content-between align-items-center">
@@ -837,6 +861,7 @@ function _buildModelSelect(id, models, currentValue, style='') {
 
 async function loadRouting() {
   loadLLMKeys();
+  loadTgToken();
   // Only fetch model lists if cache is empty
   const needOAI = !_modelCache.openai.length;
   const needAnt = !_modelCache.anthropic.length;
@@ -929,6 +954,35 @@ async function saveLLMKey(provider) {
     document.getElementById('key-input-' + provider).value = '';
     loadLLMKeys();
   } catch(e) { toast('Ошибка: ' + e.message, false); }
+}
+
+async function loadTgToken() {
+  const data = await apiGet('/admin/tg-token');
+  if (!data) return;
+  document.getElementById('tg-token-status').textContent = data.set ? '● Токен задан' : '● Не задан';
+  document.getElementById('tg-token-status').style.color = data.set ? '#4ade80' : '#f87171';
+  document.getElementById('tg-token-current').textContent = data.masked || '';
+}
+
+async function saveTgToken() {
+  const token = document.getElementById('tg-token-input').value.trim();
+  const res = document.getElementById('tg-token-result');
+  if (!token) { toast('Введи токен', false); return; }
+  res.textContent = 'Проверяем токен у Telegram...';
+  res.style.color = '#8b949e';
+  try {
+    const r = await fetch('/admin/tg-token', {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json','X-Admin-Token': TOKEN},
+      body: JSON.stringify({token}),
+    });
+    const data = await r.json();
+    if (!r.ok) { res.textContent = '✗ ' + (data.detail || 'Ошибка'); res.style.color = '#f87171'; return; }
+    res.textContent = `✓ Бот переключён: @${data.bot_username}`;
+    res.style.color = '#4ade80';
+    document.getElementById('tg-token-input').value = '';
+    loadTgToken();
+  } catch(e) { res.textContent = '✗ ' + e.message; res.style.color = '#f87171'; }
 }
 
 async function saveRouting(kind) {

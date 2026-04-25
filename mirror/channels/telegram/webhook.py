@@ -21,7 +21,9 @@ def make_webhook_router(dp, bot) -> APIRouter:
             raise HTTPException(status_code=403)
         data = await request.json()
         update = Update(**data)
-        await dp.feed_update(bot, update)
+        # Use app.state.bot so hot-swap via admin panel takes effect immediately
+        active_bot = getattr(request.app.state, "bot", bot)
+        await dp.feed_update(active_bot, update)
         return {"ok": True}
 
     return router

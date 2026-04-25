@@ -236,6 +236,74 @@ async def set_llm_key(provider: str, request: Request):
     return {"updated": provider, "set": True}
 
 
+# ── Telegram bot token ────────────────────────────────────────────────────────
+
+def _mask_tg_token(token: str) -> str:
+    if not token:
+        return ""
+    colon = token.find(":")
+    if colon > 0:
+        return token[:colon + 5] + "..." + token[-4:]
+    return token[:8] + "..." + token[-4:]
+
+
+@router.get("/tg-token", dependencies=[Depends(_verify_token)])
+async def get_tg_token():
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "") or settings.telegram_bot_token.get_secret_value()
+    return {"masked": _mask_tg_token(token), "set": bool(token)}
+
+
+@router.put("/tg-token", dependencies=[Depends(_verify_token)])
+async def set_tg_token(request: Request):
+    body = await request.json()
+    new_token = body.get("token", "").strip()
+    if not new_token or ":" not in new_token:
+        raise HTTPException(400, "Некорректный токен — ожидается формат 123456:ABC...")
+
+    from aiogram import Bot as AiogramBot
+    from aiogram.client.default import DefaultBotProperties
+
+    # Validate token with Telegram
+    try:
+        new_bot = AiogramBot(token=new_token, default=DefaultBotProperties(parse_mode=None))
+        me = await new_bot.get_me()
+    except Exception as e:
+        raise HTTPException(400, f"Telegram отверг токен: {e}")
+
+    old_bot = getattr(request.app.state, "bot", None)
+
+    # Delete old webhook
+    if old_bot:
+        try:
+            await old_bot.delete_webhook(drop_pending_updates=False)
+        except Exception:
+            pass
+
+    # Register new webhook
+    webhook_url = (
+        f"{settings.base_url}/webhook/telegram/"
+        f"{settings.telegram_webhook_secret.get_secret_value()}"
+    )
+    await new_bot.set_webhook(
+        webhook_url,
+        secret_token=settings.telegram_webhook_secret.get_secret_value(),
+    )
+
+    # Swap bot in app state
+    request.app.state.bot = new_bot
+    os.environ["TELEGRAM_BOT_TOKEN"] = new_token
+
+    # Close old session gracefully
+    if old_bot:
+        try:
+            await old_bot.session.close()
+        except Exception:
+            pass
+
+    logger.info("admin.tg_token.updated", bot_username=me.username)
+    return {"updated": True, "bot_username": me.username, "bot_id": me.id}
+
+
 # ── LLM model lists ───────────────────────────────────────────────────────────
 
 # Static Anthropic models — no public list API
