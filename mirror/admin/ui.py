@@ -225,7 +225,7 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
             <button class="btn btn-sm btn-outline-secondary" onclick="showAddLLMForm()"><i class="bi bi-plus-lg"></i> Добавить</button>
           </div>
           <div class="card-body">
-            <p style="font-size:.8rem;color:#8b949e;margin-bottom:.75rem">Хранятся в памяти до перезапуска. Для постоянного — пропишите в <code>.env</code>.</p>
+            <p style="font-size:.8rem;color:#8b949e;margin-bottom:.75rem">Ключи хранятся в памяти процесса — действуют до перезапуска. Для постоянства пропишите в <code>.env</code>.</p>
             <div id="llm-keys-list"></div>
             <div id="add-llm-form" style="display:none;margin-top:.75rem;padding:.75rem;border:1px solid #30363d;border-radius:8px">
               <div class="mb-2">
@@ -249,7 +249,7 @@ textarea.form-control{font-family:monospace;font-size:.85rem}
             <button class="btn btn-sm btn-outline-secondary" onclick="showAddTgForm()"><i class="bi bi-plus-lg"></i> Добавить бота</button>
           </div>
           <div class="card-body">
-            <p style="font-size:.8rem;color:#8b949e;margin-bottom:.75rem">Все добавленные боты работают параллельно. Хранятся в памяти — после перезапуска нужно добавить повторно.</p>
+            <p style="font-size:.8rem;color:#8b949e;margin-bottom:.75rem">Все добавленные боты работают параллельно и сохраняются в БД — восстанавливаются автоматически после перезапуска.</p>
             <div id="tg-bots-list"></div>
             <div id="add-tg-form" style="display:none;margin-top:.75rem;padding:.75rem;border:1px solid #30363d;border-radius:8px">
               <div class="mb-2">

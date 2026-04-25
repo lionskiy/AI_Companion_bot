@@ -372,6 +372,14 @@ async def add_tg_bot(request: Request):
     if any(b["name"] == name for b in bots):
         raise HTTPException(400, f"Бот '{name}' уже существует")
     info = await _do_register_bot(request, name, token)
+    async with db_module.async_session_factory() as session:
+        await session.execute(
+            text("INSERT INTO tg_bots (name, token, username, tg_id) "
+                 "VALUES (:name, :tok, :un, :tid) "
+                 "ON CONFLICT (name) DO UPDATE SET token=:tok, username=:un, tg_id=:tid"),
+            {"name": name, "tok": token, "un": info["username"], "tid": info["id"]},
+        )
+        await session.commit()
     logger.info("admin.tg_bot.added", name=name, username=info["username"])
     return {"added": True, "activated": True, "username": info["username"]}
 
@@ -384,6 +392,12 @@ async def activate_tg_bot(name: str, request: Request):
     if not entry:
         raise HTTPException(404, "Бот не найден")
     info = await _do_register_bot(request, name, entry["token"])
+    async with db_module.async_session_factory() as session:
+        await session.execute(
+            text("UPDATE tg_bots SET username=:un, tg_id=:tid WHERE name=:name"),
+            {"un": info["username"], "tid": info["id"], "name": name},
+        )
+        await session.commit()
     logger.info("admin.tg_bot.reactivated", name=name, username=info["username"])
     return {"activated": True, "username": info["username"]}
 
@@ -418,6 +432,9 @@ async def remove_tg_bot(name: str, request: Request):
         remaining = request.app.state.tg_bots
         if remaining:
             request.app.state.bot = remaining[-1].get("bot_obj") or request.app.state.bot
+    async with db_module.async_session_factory() as session:
+        await session.execute(text("DELETE FROM tg_bots WHERE name=:name"), {"name": name})
+        await session.commit()
     logger.info("admin.tg_bot.removed", name=name)
     return {"removed": True}
 
