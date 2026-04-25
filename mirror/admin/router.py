@@ -251,6 +251,19 @@ async def set_llm_key(provider: str, request: Request):
     return {"updated": provider}
 
 
+@router.delete("/llm-keys/{provider}", dependencies=[Depends(_verify_token)])
+async def delete_llm_key(provider: str):
+    if provider not in _LLM_PROVIDERS:
+        raise HTTPException(400, f"Unknown provider: {provider!r}")
+    env_var = _LLM_PROVIDERS[provider]["env"]
+    os.environ.pop(env_var, None)
+    from mirror.core.llm.router import LLMRouter
+    LLMRouter._routing_cache.clear()
+    LLMRouter._provider_cache.clear()
+    logger.info("admin.llm_key.deleted", provider=provider)
+    return {"deleted": provider}
+
+
 # ── Telegram bots ─────────────────────────────────────────────────────────────
 
 def _mask_tg_token(token: str) -> str:
@@ -263,11 +276,19 @@ def _mask_tg_token(token: str) -> str:
 def _ensure_tg_bots(app_state) -> list:
     if not hasattr(app_state, "tg_bots"):
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "") or settings.telegram_bot_token.get_secret_value()
-        app_state.tg_bots = [{"name": "Основной", "token": token, "username": None, "active": True}] if token else []
+        if token:
+            from aiogram import Bot as AiogramBot
+            from aiogram.client.default import DefaultBotProperties
+            bot_obj = AiogramBot(token=token, default=DefaultBotProperties(parse_mode=None))
+            app_state.tg_bots = [{"name": "Основной", "token": token, "username": None,
+                                   "tg_id": None, "bot_obj": bot_obj, "active": True}]
+        else:
+            app_state.tg_bots = []
     return app_state.tg_bots
 
 
-async def _do_activate_bot(request: Request, token: str) -> dict:
+async def _do_register_bot(request: Request, name: str, token: str) -> dict:
+    """Validate token, set per-bot webhook, add/update entry in tg_bots list."""
     from aiogram import Bot as AiogramBot
     from aiogram.client.default import DefaultBotProperties
     try:
@@ -275,24 +296,23 @@ async def _do_activate_bot(request: Request, token: str) -> dict:
         me = await new_bot.get_me()
     except Exception as e:
         raise HTTPException(400, f"Telegram отверг токен: {e}")
-    old_bot = getattr(request.app.state, "bot", None)
-    if old_bot:
-        try:
-            await old_bot.delete_webhook(drop_pending_updates=False)
-        except Exception:
-            pass
-    webhook_url = (
-        f"{settings.base_url}/webhook/telegram/"
-        f"{settings.telegram_webhook_secret.get_secret_value()}"
-    )
-    await new_bot.set_webhook(webhook_url, secret_token=settings.telegram_webhook_secret.get_secret_value())
+
+    if not settings.polling_mode:
+        _secret = settings.telegram_webhook_secret.get_secret_value()
+        webhook_url = f"{settings.base_url}/webhook/telegram/{me.id}/{_secret}"
+        await new_bot.set_webhook(webhook_url, secret_token=_secret)
+
+    bots = _ensure_tg_bots(request.app.state)
+    # Remove any stale entry with same name or same tg_id
+    request.app.state.tg_bots = [
+        b for b in bots if b["name"] != name and b.get("tg_id") != me.id
+    ]
+    request.app.state.tg_bots.append({
+        "name": name, "token": token, "username": me.username,
+        "tg_id": me.id, "bot_obj": new_bot, "active": True,
+    })
+    # Keep app.state.bot pointing to most recently registered bot
     request.app.state.bot = new_bot
-    os.environ["TELEGRAM_BOT_TOKEN"] = token
-    if old_bot:
-        try:
-            await old_bot.session.close()
-        except Exception:
-            pass
     return {"username": me.username, "id": me.id}
 
 
@@ -301,7 +321,8 @@ async def list_tg_bots(request: Request):
     bots = _ensure_tg_bots(request.app.state)
     return {"bots": [
         {"name": b["name"], "masked": _mask_tg_token(b["token"]),
-         "username": b.get("username"), "active": b.get("active", False)}
+         "username": b.get("username"), "active": b.get("active", True),
+         "tg_id": b.get("tg_id")}
         for b in bots
     ]}
 
@@ -311,7 +332,6 @@ async def add_tg_bot(request: Request):
     body = await request.json()
     name = body.get("name", "").strip()
     token = body.get("token", "").strip()
-    activate = body.get("activate", False)
     if not name:
         raise HTTPException(400, "Укажи название бота")
     if not token or ":" not in token:
@@ -319,39 +339,20 @@ async def add_tg_bot(request: Request):
     bots = _ensure_tg_bots(request.app.state)
     if any(b["name"] == name for b in bots):
         raise HTTPException(400, f"Бот '{name}' уже существует")
-    if activate:
-        info = await _do_activate_bot(request, token)
-        for b in bots:
-            b["active"] = False
-        bots.append({"name": name, "token": token, "username": info["username"], "active": True})
-        logger.info("admin.tg_bot.added_and_activated", name=name, username=info["username"])
-        return {"added": True, "activated": True, "username": info["username"]}
-    else:
-        from aiogram import Bot as AiogramBot
-        from aiogram.client.default import DefaultBotProperties
-        try:
-            tmp = AiogramBot(token=token, default=DefaultBotProperties(parse_mode=None))
-            me = await tmp.get_me()
-            await tmp.session.close()
-        except Exception as e:
-            raise HTTPException(400, f"Telegram отверг токен: {e}")
-        bots.append({"name": name, "token": token, "username": me.username, "active": False})
-        logger.info("admin.tg_bot.added", name=name, username=me.username)
-        return {"added": True, "activated": False, "username": me.username}
+    info = await _do_register_bot(request, name, token)
+    logger.info("admin.tg_bot.added", name=name, username=info["username"])
+    return {"added": True, "activated": True, "username": info["username"]}
 
 
 @router.put("/tg-bots/{name}/activate", dependencies=[Depends(_verify_token)])
 async def activate_tg_bot(name: str, request: Request):
+    """Re-register webhook for a bot (useful if webhook was lost)."""
     bots = _ensure_tg_bots(request.app.state)
     entry = next((b for b in bots if b["name"] == name), None)
     if not entry:
         raise HTTPException(404, "Бот не найден")
-    info = await _do_activate_bot(request, entry["token"])
-    for b in bots:
-        b["active"] = False
-    entry["active"] = True
-    entry["username"] = info["username"]
-    logger.info("admin.tg_bot.activated", name=name, username=info["username"])
+    info = await _do_register_bot(request, name, entry["token"])
+    logger.info("admin.tg_bot.reactivated", name=name, username=info["username"])
     return {"activated": True, "username": info["username"]}
 
 
@@ -361,9 +362,23 @@ async def remove_tg_bot(name: str, request: Request):
     entry = next((b for b in bots if b["name"] == name), None)
     if not entry:
         raise HTTPException(404, "Бот не найден")
-    if entry.get("active"):
-        raise HTTPException(400, "Нельзя удалить активного бота — сначала активируй другой")
+    bot_obj = entry.get("bot_obj")
+    if bot_obj:
+        try:
+            await bot_obj.delete_webhook(drop_pending_updates=False)
+        except Exception:
+            pass
+        try:
+            await bot_obj.session.close()
+        except Exception:
+            pass
     request.app.state.tg_bots = [b for b in bots if b["name"] != name]
+    # If deleted bot was app.state.bot, switch to next available
+    if bot_obj and bot_obj is getattr(request.app.state, "bot", None):
+        remaining = request.app.state.tg_bots
+        if remaining:
+            request.app.state.bot = remaining[-1].get("bot_obj") or request.app.state.bot
+    logger.info("admin.tg_bot.removed", name=name)
     return {"removed": True}
 
 

@@ -150,6 +150,25 @@ async def lifespan(app: FastAPI):
     app.state.bot = bot
     app.state.dp = dp
 
+    # Resolve bot's Telegram ID for per-bot webhook routing
+    _bot_tg_id: int | None = None
+    _bot_username: str | None = None
+    try:
+        _me = await bot.get_me()
+        _bot_tg_id = _me.id
+        _bot_username = _me.username
+    except Exception as e:
+        logger.warning("telegram.get_me_failed", error=str(e))
+
+    app.state.tg_bots = [{
+        "name": "Основной",
+        "token": settings.telegram_bot_token.get_secret_value(),
+        "username": _bot_username,
+        "tg_id": _bot_tg_id,
+        "bot_obj": bot,
+        "active": True,
+    }]
+
     if settings.polling_mode:
         # Long polling — не нужен публичный URL
         try:
@@ -159,16 +178,14 @@ async def lifespan(app: FastAPI):
         _polling_task = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
         logger.info("telegram.polling_started")
     else:
-        # Webhook mode
+        # Webhook mode — per-bot URL when tg_id known, legacy fallback otherwise
         from mirror.channels.telegram.webhook import make_webhook_router
-        webhook_url = (
-            f"{settings.base_url}/webhook/telegram/"
-            f"{settings.telegram_webhook_secret.get_secret_value()}"
-        )
-        await bot.set_webhook(
-            webhook_url,
-            secret_token=settings.telegram_webhook_secret.get_secret_value(),
-        )
+        _secret = settings.telegram_webhook_secret.get_secret_value()
+        if _bot_tg_id:
+            webhook_url = f"{settings.base_url}/webhook/telegram/{_bot_tg_id}/{_secret}"
+        else:
+            webhook_url = f"{settings.base_url}/webhook/telegram/{_secret}"
+        await bot.set_webhook(webhook_url, secret_token=_secret)
         app.include_router(make_webhook_router(dp, bot))
         logger.info("telegram.webhook_set", url=webhook_url.split("/webhook")[0] + "/webhook/...")
 
