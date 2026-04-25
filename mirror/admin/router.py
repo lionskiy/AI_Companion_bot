@@ -288,7 +288,8 @@ def _ensure_tg_bots(app_state) -> list:
 
 
 async def _do_register_bot(request: Request, name: str, token: str) -> dict:
-    """Validate token, set per-bot webhook, add/update entry in tg_bots list."""
+    """Validate token, connect bot (webhook or polling), add/update entry in tg_bots."""
+    import asyncio
     from aiogram import Bot as AiogramBot
     from aiogram.client.default import DefaultBotProperties
     try:
@@ -297,21 +298,32 @@ async def _do_register_bot(request: Request, name: str, token: str) -> dict:
     except Exception as e:
         raise HTTPException(400, f"Telegram отверг токен: {e}")
 
-    if not settings.polling_mode:
+    polling_task = None
+    if settings.polling_mode:
+        dp = getattr(request.app.state, "dp", None)
+        if dp:
+            polling_task = asyncio.create_task(
+                dp.start_polling(new_bot, handle_signals=False)
+            )
+    else:
         _secret = settings.telegram_webhook_secret.get_secret_value()
         webhook_url = f"{settings.base_url}/webhook/telegram/{me.id}/{_secret}"
         await new_bot.set_webhook(webhook_url, secret_token=_secret)
 
     bots = _ensure_tg_bots(request.app.state)
-    # Remove any stale entry with same name or same tg_id
+    # Cancel old polling task for same bot if re-registering
+    old = next((b for b in bots if b["name"] == name or b.get("tg_id") == me.id), None)
+    if old and old.get("polling_task"):
+        old["polling_task"].cancel()
+    # Remove stale entries with same name or tg_id
     request.app.state.tg_bots = [
         b for b in bots if b["name"] != name and b.get("tg_id") != me.id
     ]
     request.app.state.tg_bots.append({
         "name": name, "token": token, "username": me.username,
         "tg_id": me.id, "bot_obj": new_bot, "active": True,
+        "polling_task": polling_task,
     })
-    # Keep app.state.bot pointing to most recently registered bot
     request.app.state.bot = new_bot
     return {"username": me.username, "id": me.id}
 
@@ -362,6 +374,14 @@ async def remove_tg_bot(name: str, request: Request):
     entry = next((b for b in bots if b["name"] == name), None)
     if not entry:
         raise HTTPException(404, "Бот не найден")
+    # Stop polling task (polling mode)
+    polling_task = entry.get("polling_task")
+    if polling_task:
+        polling_task.cancel()
+        try:
+            await polling_task
+        except Exception:
+            pass
     bot_obj = entry.get("bot_obj")
     if bot_obj:
         try:
