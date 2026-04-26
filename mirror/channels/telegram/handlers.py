@@ -2,7 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import structlog
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
