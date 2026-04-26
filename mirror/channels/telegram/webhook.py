@@ -7,7 +7,7 @@ from mirror.config import settings
 router = APIRouter()
 
 
-def make_webhook_router(dp, bot) -> APIRouter:
+def make_webhook_router(dp) -> APIRouter:
     # Per-bot route: /webhook/telegram/{tg_bot_id}/{secret}
     # Used by all bots added via admin panel.
     @router.post("/webhook/telegram/{bot_id}/{secret}")
@@ -41,7 +41,9 @@ def make_webhook_router(dp, bot) -> APIRouter:
             raise HTTPException(status_code=403)
         data = await request.json()
         update = Update(**data)
-        active_bot = getattr(request.app.state, "bot", bot)
+        active_bot = getattr(request.app.state, "bot", None)
+        if active_bot is None:
+            return {"ok": True}
         await dp.feed_update(active_bot, update)
         return {"ok": True}
 

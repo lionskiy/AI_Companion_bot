@@ -273,19 +273,6 @@ def _mask_tg_token(token: str) -> str:
     return (token[:colon + 5] + "..." + token[-4:]) if colon > 0 else _mask_key(token)
 
 
-def _ensure_tg_bots(app_state) -> list:
-    if not hasattr(app_state, "tg_bots"):
-        token = os.environ.get("TELEGRAM_BOT_TOKEN", "") or settings.telegram_bot_token.get_secret_value()
-        if token:
-            from aiogram import Bot as AiogramBot
-            from aiogram.client.default import DefaultBotProperties
-            bot_obj = AiogramBot(token=token, default=DefaultBotProperties(parse_mode=None))
-            app_state.tg_bots = [{"name": "Основной", "token": token, "username": None,
-                                   "tg_id": None, "bot_obj": bot_obj, "active": True}]
-        else:
-            app_state.tg_bots = []
-    return app_state.tg_bots
-
 
 async def _bot_polling_loop(bot, dp) -> None:
     """Custom polling loop for bots added at runtime.
@@ -330,7 +317,9 @@ async def _do_register_bot(request: Request, name: str, token: str) -> dict:
         webhook_url = f"{settings.base_url}/webhook/telegram/{me.id}/{_secret}"
         await new_bot.set_webhook(webhook_url, secret_token=_secret)
 
-    bots = _ensure_tg_bots(request.app.state)
+    if not hasattr(request.app.state, "tg_bots"):
+        request.app.state.tg_bots = []
+    bots = request.app.state.tg_bots
     # Cancel old polling task if re-registering same bot
     old = next((b for b in bots if b["name"] == name or b.get("tg_id") == me.id), None)
     if old and old.get("polling_task"):
@@ -344,12 +333,14 @@ async def _do_register_bot(request: Request, name: str, token: str) -> dict:
         "tg_id": me.id, "bot_obj": new_bot, "active": True,
         "polling_task": polling_task,
     })
+    if not getattr(request.app.state, "bot", None):
+        request.app.state.bot = new_bot
     return {"username": me.username, "id": me.id}
 
 
 @router.get("/tg-bots", dependencies=[Depends(_verify_token)])
 async def list_tg_bots(request: Request):
-    bots = _ensure_tg_bots(request.app.state)
+    bots = getattr(request.app.state, "tg_bots", [])
     return {"bots": [
         {"name": b["name"], "masked": _mask_tg_token(b["token"]),
          "username": b.get("username"), "active": b.get("active", True),
@@ -367,7 +358,7 @@ async def add_tg_bot(request: Request):
         raise HTTPException(400, "Укажи название бота")
     if not token or ":" not in token:
         raise HTTPException(400, "Некорректный токен")
-    bots = _ensure_tg_bots(request.app.state)
+    bots = getattr(request.app.state, "tg_bots", [])
     if any(b["name"] == name for b in bots):
         raise HTTPException(400, f"Бот '{name}' уже существует")
     info = await _do_register_bot(request, name, token)
@@ -386,7 +377,7 @@ async def add_tg_bot(request: Request):
 @router.put("/tg-bots/{name}/activate", dependencies=[Depends(_verify_token)])
 async def activate_tg_bot(name: str, request: Request):
     """Re-register webhook for a bot (useful if webhook was lost)."""
-    bots = _ensure_tg_bots(request.app.state)
+    bots = getattr(request.app.state, "tg_bots", [])
     entry = next((b for b in bots if b["name"] == name), None)
     if not entry:
         raise HTTPException(404, "Бот не найден")
@@ -403,7 +394,7 @@ async def activate_tg_bot(name: str, request: Request):
 
 @router.delete("/tg-bots/{name}", dependencies=[Depends(_verify_token)])
 async def remove_tg_bot(name: str, request: Request):
-    bots = _ensure_tg_bots(request.app.state)
+    bots = getattr(request.app.state, "tg_bots", [])
     entry = next((b for b in bots if b["name"] == name), None)
     if not entry:
         raise HTTPException(404, "Бот не найден")
@@ -426,6 +417,10 @@ async def remove_tg_bot(name: str, request: Request):
         except Exception:
             pass
     request.app.state.tg_bots = [b for b in bots if b["name"] != name]
+    # If removed bot was the primary reference, switch to next available
+    if bot_obj and bot_obj is getattr(request.app.state, "bot", None):
+        remaining = request.app.state.tg_bots
+        request.app.state.bot = remaining[0].get("bot_obj") if remaining else None
     async with db_module.async_session_factory() as session:
         await session.execute(text("DELETE FROM tg_bots WHERE name=:name"), {"name": name})
         await session.commit()

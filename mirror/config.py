@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr
 
     # Telegram
-    telegram_bot_token: SecretStr
+    telegram_bot_token: SecretStr = SecretStr("")  # legacy, bots managed via admin panel
     telegram_webhook_secret: SecretStr
 
     # Admin
