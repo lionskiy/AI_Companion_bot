@@ -2,7 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import structlog
-from aiogram import Bot, Router
+from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
@@ -52,7 +52,7 @@ async def typing_action(bot: Bot, chat_id: int):
             pass
 
 
-def make_handlers_router(adapter, dialog_service, bot: Bot) -> Router:
+def make_handlers_router(adapter, dialog_service) -> Router:
     # `bot` parameter kept for signature compat but handlers receive the active
     # bot via aiogram DI (whatever was passed to dp.feed_update), so multi-bot
     # operation works correctly — each bot replies through its own token.
