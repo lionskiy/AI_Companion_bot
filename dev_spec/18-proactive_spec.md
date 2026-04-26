@@ -9,9 +9,9 @@
 
 ## Цель
 
-Реализовать проактивное поведение бота — бот пишет первым без запроса пользователя. Это ключевой механизм удержания: пользователь помнит о боте, возвращается. Проактивность ощущается естественной, персонализированной, не навязчивой.
+Реализовать проактивное поведение бота — бот пишет первым без запроса пользователя. Проактивность ощущается естественной, персонализированной, не навязчивой.
 
-На этапе 2: базовые типы проактивных сообщений для Free-тарифа (ежедневный ритуал, чекин) + инфраструктура для платных типов.
+На этапе 2: базовые типы проактивных сообщений (ежедневный ритуал, чекин, продолжение темы) + инфраструктура для астро-событий.
 
 ---
 
@@ -19,50 +19,55 @@
 
 ### Инфраструктура
 
-- [ ] Система очереди кандидатов: периодически (каждые 30 мин) строится список кандидатов для каждого пользователя, каждому присваивается score
-- [ ] Кандидат с max score отправляется если score > порога и не нарушает cooldown
-- [ ] Глобальный лимит инициатив: не более N сообщений в сутки (N настраивается в app_config, default 2)
-- [ ] Cooldown по типу: один тип не повторяется чаще чем раз в X часов (настраивается)
-- [ ] `/quiet` — отключает все проактивные сообщения кроме daily_ritual (если явно включён)
-- [ ] `/active` — максимальная проактивность
-- [ ] Тихие часы: проактивные сообщения не отправляются с 23:00 до 08:00 (по часовому поясу пользователя)
-- [ ] После 3+ проигнорированных инициатив подряд — частота автоматически снижается
+- [ ] Batched Celery task каждые 30 мин строит список кандидатов (batch_size=500), каждому присваивается score
+- [ ] Кандидат с max score отправляется если score > `proactive_score_threshold` (default 0.5, настраивается в app_config)
+- [ ] Глобальный лимит: не более `proactive_daily_limit` сообщений в сутки (default 2)
+- [ ] Cooldown по типу: один тип не повторяется раньше cooldown (см. таблицу ниже)
+- [ ] `/quiet` — устанавливает `proactive_mode='quiet'` + `journal_notifications_enabled=False`
+- [ ] `/active` — устанавливает `proactive_mode='active'`
+- [ ] Тихие часы: сообщения не отправляются между `quiet_hours_start` и `quiet_hours_end` (по timezone пользователя)
+- [ ] После 3+ проигнорированных инициатив подряд — интервал увеличивается в 2 раза (floor: 1 в неделю)
+- [ ] «Игнорирование» = пользователь не ответил в течение 24 часов после отправки инициативы
 
-### Типы сообщений (этап 2, все тарифы)
+### Типы сообщений
 
-- [ ] **daily_ritual** — уже реализован в этапе 1, интегрировать в проактивный планировщик
-- [ ] **emotional_checkin** — эмоциональный чекин после 2-3 дней молчания: «Эй, всё хорошо? Тебя не было давно»
-- [ ] **astro_event** — уведомление о значимом транзите (Меркурий ретроградный, Венера в знаке и т.д.) — требует натальной карты
-- [ ] **topic_continuation** — возврат к незакрытой теме из прошлого разговора (из memory_episodes)
+- [ ] **daily_ritual** — интегрируется в ProactiveOrchestrator (не удаляет существующий task)
+- [ ] **emotional_checkin** — чекин после 2+ дней молчания
+- [ ] **topic_continuation** — возврат к незакрытой теме из памяти
+- [ ] **astro_event** — уведомление о транзите (только если есть натальная карта)
 
-### «Занят» + возврат (механика)
+### «Занят» (BusyBehavior)
 
-- [ ] При входящем сообщении от пользователя: с вероятностью `busy_probability` (default 3%, настраивается) бот отвечает что «занят»
-- [ ] Через 5-40 мин (случайно) — бот возвращается и обрабатывает оригинальное сообщение
-- [ ] «Занят» не срабатывает если пользователь молчал >24 часов
-- [ ] «Занят» не срабатывает при кризисных сигналах (risk_level=crisis или risk_signal)
-- [ ] «Занят» — только для тарифов Plus/Pro (в этапе 2 заготовка, активируется при монетизации)
+- [ ] С вероятностью `busy_probability` (default 3%) бот «занят» — отвечает что занята и возвращается через 5-40 мин
+- [ ] «Занят» не срабатывает если пользователь молчал > 24 часов
+- [ ] «Занят» не срабатывает при risk_level=crisis или risk_signal
+- [ ] «Занят» — только для тарифов Plus/Pro (заготовка; активируется при монетизации этапа 3)
 
 ---
 
 ## Архитектура
 
-### ProactiveOrchestrator — масштабируемый подход
-
-**НЕ** итерировать всех пользователей в одном task. Подход: очередь + батчи.
+### ProactiveOrchestrator
 
 ```python
-@app.task
-async def proactive_dispatch_batch(offset: int, batch_size: int = 500):
-    """Обрабатывает один батч пользователей. Celery beat вызывает каждые 30 мин
-    только первый батч; остальные запускаются chain'ом."""
-    async with async_session_factory() as s:
-        users = await s.execute(
-            select(UserProfile.user_id, UserProfile.timezone,
-                   UserProfile.proactive_mode, UserProfile.quiet_hours_start,
-                   UserProfile.quiet_hours_end)
+@celery_app.task(
+    name="mirror.workers.tasks.proactive.proactive_dispatch_batch",
+    bind=True,
+    max_retries=2,
+    soft_time_limit=300,  # 5 мин на батч
+)
+def proactive_dispatch_batch(self, offset: int = 0, batch_size: int = 500):
+    asyncio.run(_dispatch_batch(offset, batch_size))
+
+async def _dispatch_batch(offset: int, batch_size: int) -> None:
+    await ensure_db_pool()
+    async with get_session() as session:
+        users = await session.execute(
+            select(
+                UserProfile.user_id, UserProfile.timezone, UserProfile.proactive_mode,
+                UserProfile.quiet_hours_start, UserProfile.quiet_hours_end,
+            )
             .where(UserProfile.proactive_mode != 'quiet')
-            # Только активные за последние 30 дней:
             .where(UserProfile.user_id.in_(
                 select(MemoryEpisode.user_id)
                 .where(MemoryEpisode.created_at > func.now() - text("interval '30 days'"))
@@ -70,18 +75,29 @@ async def proactive_dispatch_batch(offset: int, batch_size: int = 500):
             ))
             .offset(offset).limit(batch_size)
         )
+    rows = users.all()
     orchestrator = ProactiveOrchestrator()
-    for user in users.all():
-        await orchestrator.process_user(user)
-    # Запустить следующий батч если этот был полный
-    if len(users.all()) == batch_size:
-        proactive_dispatch_batch.delay(offset + batch_size, batch_size)
+    for row in rows:
+        try:
+            await orchestrator.process_user(row)
+        except Exception:
+            logger.warning("proactive.process_user_failed", user_id=str(row.user_id))
+
+    # Цепочка: если батч был полный — запустить следующий
+    if len(rows) == batch_size:
+        proactive_dispatch_batch.apply_async(kwargs={"offset": offset + batch_size, "batch_size": batch_size})
+```
+
+### ProactiveOrchestrator
+
+```python
+SCORE_THRESHOLD = float(get_app_config("proactive_score_threshold", "0.5"))
 
 class ProactiveOrchestrator:
-    async def process_user(self, user):
-        if not await self._check_quiet_hours(user):
+    async def process_user(self, user: Row) -> None:
+        if not await self._in_quiet_hours(user):
             return
-        if await self._check_daily_limit(user.user_id):
+        if await self._daily_limit_reached(user.user_id):
             return
         candidates = await self._build_candidates(user.user_id)
         if not candidates:
@@ -90,8 +106,46 @@ class ProactiveOrchestrator:
         if best.score >= SCORE_THRESHOLD:
             await self._send(user.user_id, best)
 
-    async def _build_candidates(self, user_id) -> list[ProactiveCandidate]:
-        """Собирает кандидатов из всех типов и считает score."""
+    async def _in_quiet_hours(self, user: Row) -> bool:
+        """Возвращает True если СЕЙЧАС вне тихих часов (можно отправлять)."""
+        import zoneinfo
+        try:
+            tz = zoneinfo.ZoneInfo(user.timezone or "Europe/Moscow")
+            local_now = datetime.now(tz).time()
+            start = user.quiet_hours_start or time(23, 0)
+            end = user.quiet_hours_end or time(8, 0)
+            # Учитываем переход через полночь (23:00 - 08:00)
+            if start > end:
+                return not (local_now >= start or local_now < end)
+            return not (start <= local_now < end)
+        except Exception:
+            return True  # при ошибке — не блокируем
+
+    async def _daily_limit_reached(self, user_id: UUID) -> bool:
+        count_key = f"proactive:daily_count:{user_id}:{date.today().isoformat()}"
+        count = int(await redis.get(count_key) or 0)
+        limit = int(get_app_config("proactive_daily_limit", "2"))
+        return count >= limit
+
+    async def _build_candidates(self, user_id: UUID) -> list["ProactiveCandidate"]:
+        candidates = []
+        candidates += await self._score_emotional_checkin(user_id)
+        candidates += await self._score_topic_continuation(user_id)
+        candidates += await self._score_astro_event(user_id)
+        return [c for c in candidates if c.score > 0]
+
+    async def _send(self, user_id: UUID, candidate: "ProactiveCandidate") -> None:
+        text = await self._compose(user_id, candidate)
+        await _deliver_to_user(user_id, text)
+        # Обновить Redis
+        count_key = f"proactive:daily_count:{user_id}:{date.today().isoformat()}"
+        await redis.incr(count_key)
+        await redis.expire(count_key, 86400)
+        cooldown_key = f"proactive:last_sent:{user_id}:{candidate.type}"
+        await redis.setex(cooldown_key, candidate.cooldown_hours * 3600, datetime.utcnow().isoformat())
+        # Логировать в proactive_log
+        await _log_proactive(user_id, candidate.type, candidate.score)
+        logger.info("proactive.sent", user_id=str(user_id), type=candidate.type, score=candidate.score)
 ```
 
 ### ProactiveCandidate
@@ -100,100 +154,261 @@ class ProactiveOrchestrator:
 @dataclass
 class ProactiveCandidate:
     type: str           # emotional_checkin | astro_event | topic_continuation | daily_ritual
-    score: float        # итоговый score (0-1)
-    context: dict       # данные для генерации текста
+    score: float        # итоговый score 0.0-1.0
+    context: dict       # данные для генерации текста (разные для каждого type)
     cooldown_hours: int # минимум часов до повтора этого типа
 ```
+
+### Cooldown по типу
+
+| Тип | cooldown_hours | Описание |
+|-----|----------------|---------|
+| `emotional_checkin` | 72 | Не чаще раза в 3 дня |
+| `topic_continuation` | 48 | Не чаще раза в 2 дня |
+| `astro_event` | 24 | Не чаще раза в сутки |
+| `daily_ritual` | 20 | Ежедневный ритуал — ~раз в день |
 
 ### Скоринг кандидатов
 
 ```python
-# emotional_checkin
-days_silent = (now - last_user_message).days
-if days_silent >= 2:
+async def _score_emotional_checkin(self, user_id: UUID) -> list[ProactiveCandidate]:
+    last_msg = await _get_last_user_message_time(user_id)
+    if last_msg is None:
+        return []
+    days_silent = (datetime.utcnow() - last_msg).days
+    if days_silent < 2:
+        return []
     score = min(0.9, 0.4 + days_silent * 0.1)
-else:
-    score = 0.0
-# штраф если уже был недавно → но не ниже нуля
-if recent_checkin_sent:
-    score = max(0.0, score - 0.4)
+    # Штраф если недавно уже отправляли checkin
+    if await redis.exists(f"proactive:last_sent:{user_id}:emotional_checkin"):
+        score = max(0.0, score - 0.4)
+    if score <= 0:
+        return []
+    return [ProactiveCandidate(
+        type="emotional_checkin",
+        score=score,
+        context={"days_silent": days_silent},
+        cooldown_hours=72,
+    )]
 
-# astro_event
-score = event.significance * 0.8  # significance из AstrologyService
-if not user_has_natal_chart:
-    score = 0  # без натала не отправляем
+async def _score_topic_continuation(self, user_id: UUID) -> list[ProactiveCandidate]:
+    # Берём последний эпизод из памяти (не journal, не dream)
+    last_ep = await _get_last_episode(user_id, exclude_source_modes=["journal", "dream"])
+    if not last_ep:
+        return []
+    days_since = (datetime.utcnow() - last_ep.created_at).days
+    if days_since < 1 or days_since > 7:
+        return []
+    score = last_ep.importance * 0.7
+    if await redis.exists(f"proactive:last_sent:{user_id}:topic_continuation"):
+        score = max(0.0, score - 0.3)
+    if score <= 0:
+        return []
+    return [ProactiveCandidate(
+        type="topic_continuation",
+        score=score,
+        context={"episode_summary": last_ep.summary[:200]},
+        cooldown_hours=48,
+    )]
 
-# topic_continuation
-last_episode = await memory.get_recent_episodes(user_id, limit=1)
-if last_episode and not last_episode.resolved:
-    score = last_episode.importance * 0.7
+async def _score_astro_event(self, user_id: UUID) -> list[ProactiveCandidate]:
+    # Требует натальной карты — без неё score=0
+    has_natal = await _user_has_natal_chart(user_id)
+    if not has_natal:
+        return []
+    event = await astrology_service.get_significant_transit(user_id)
+    if not event:
+        return []
+    score = event.significance * 0.8  # significance 0-1 из AstrologyService
+    return [ProactiveCandidate(
+        type="astro_event",
+        score=score,
+        context={"event": event.description, "planet": event.planet},
+        cooldown_hours=24,
+    )]
 ```
+
+### Игнорирование и снижение частоты
+
+```python
+# Вызывается при получении любого сообщения от пользователя в telegram/handlers.py:
+async def _update_ignored_streak(user_id: UUID) -> None:
+    """
+    Если у пользователя было pending proactive сообщение (sent < 24h назад, нет reply) — 
+    он ответил сейчас, сбрасываем streak.
+    Если streak >= 3 — удваиваем все cooldown'ы через временный Redis-модификатор.
+    """
+    streak_key = f"proactive:ignored_streak:{user_id}"
+    # При получении ответа — сбрасываем streak
+    await redis.delete(streak_key)
+
+# Вызывается в proactive_dispatch_batch перед отправкой:
+async def _check_ignored_streak(user_id: UUID) -> int:
+    streak = int(await redis.get(f"proactive:ignored_streak:{user_id}") or 0)
+    return streak
+
+# После отправки и отсутствия ответа в течение 24 часов — проверяем:
+# (В следующем batch-запуске через 30 мин, если last_sent < 24h назад и нет reply)
+async def _maybe_increment_ignored_streak(user_id: UUID, candidate_type: str) -> None:
+    last_sent = await redis.get(f"proactive:last_sent:{user_id}:{candidate_type}")
+    if not last_sent:
+        return
+    sent_at = datetime.fromisoformat(last_sent)
+    if (datetime.utcnow() - sent_at).total_seconds() > 86400:
+        await redis.incr(f"proactive:ignored_streak:{user_id}")
+        await redis.expire(f"proactive:ignored_streak:{user_id}", 604800)
+```
+
+При `ignored_streak >= 3`: умножить cooldown_hours кандидата на 2. При `ignored_streak >= 6`: умножить на 4. Floor — кандидат с cooldown 72ч при streak=3 не отправляется чаще 1 раза в неделю.
 
 ### Механика «занят»
 
 ```python
 class BusyBehavior:
+    # Тексты localizable — хранить в app_config или enum
     BUSY_ACTIVITIES = [
         "была на прогулке", "читала кое-что интересное",
         "занималась медитацией", "помогала подруге",
         "смотрела закат", "немного задремала",
     ]
 
-    async def maybe_intercept(self, user_id, message_text, bot) -> bool:
-        """Вызывается ДО обработки входящего сообщения. Если True — сообщение не обрабатывается сейчас."""
-        profile = await get_profile(user_id)
-        if profile.tier not in ('plus', 'pro'):
+    async def maybe_intercept(self, user_id: UUID, message_text: str, bot: Bot, chat_id: int) -> bool:
+        """
+        Вызывается ДО обработки входящего сообщения, в telegram/handlers.py:
+            if await busy_behavior.maybe_intercept(uid, unified.text, bot, message.chat.id):
+                return  # сообщение обработано позже
+
+        Возвращает True если сообщение перехвачено (пользователю ответили "занята").
+        """
+        profile = await _get_profile(user_id)
+        if profile.tier not in ('plus', 'pro'):  # Только Plus/Pro (этап 3)
             return False
-        last_msg_time = await get_last_user_message_time(user_id)
-        if (now - last_msg_time).total_seconds() > 86400:  # >24 часов
+        last_msg_time = await _get_last_user_message_time(user_id)
+        if last_msg_time and (datetime.utcnow() - last_msg_time).total_seconds() > 86400:
+            return False  # молчал > 24ч — не перехватываем
+        # Проверка policy — при кризисе не перехватываем
+        policy = await policy_engine.check(user_id, message_text)
+        if policy.risk_level in ("crisis", "risk_signal"):
             return False
-        # busy_probability = 0.03 по умолчанию (3% шанс "занята")
-        if random.random() >= profile.busy_probability:   # >= означает: 97% случаев НЕ занята
+        busy_prob = profile.busy_probability or 0.03
+        if random.random() >= busy_prob:  # 97% случаев — НЕ занята
             return False
+
         activity = random.choice(self.BUSY_ACTIVITIES)
-        await bot.send_message(user_id, f"Сори, {activity}! Скоро вернусь 😊")
-        # Сохранить в Redis: busy_pending:{user_id} = message_text, TTL=2400
+        await bot.send_message(chat_id, f"Сори, {activity}! Скоро вернусь 😊")
+        # Сохранить оригинальное сообщение в Redis
+        await redis.setex(f"busy_pending:{user_id}", 2400, message_text)
+        # Запланировать возврат через 5-40 мин
         delay = random.randint(300, 2400)
-        await schedule_return.apply_async(
-            args=[user_id, message_text, activity],
-            countdown=delay
+        schedule_return.apply_async(
+            args=[str(user_id), str(chat_id), message_text, activity],
+            countdown=delay,
         )
         return True
 ```
 
-### Redis ключи
-
+**Интеграция в telegram/handlers.py:**
+```python
+# В handle_message (обычный текстовый handler) — ПЕРЕД dialog_service.handle():
+uid = UUID(unified.global_user_id)
+if await busy_behavior.maybe_intercept(uid, unified.text, bot, message.chat.id):
+    return  # сообщение будет обработано позже через schedule_return
 ```
-proactive:last_sent:{user_id}:{type}  → timestamp  TTL=cooldown_hours
-proactive:daily_count:{user_id}:{date} → int        TTL=86400
-proactive:ignored_streak:{user_id}    → int         TTL=7days
-busy_pending:{user_id}                → message_text  TTL=2400
+
+### Celery task schedule_return
+
+```python
+@celery_app.task(
+    name="mirror.workers.tasks.proactive.schedule_return",
+    bind=True,
+    max_retries=2,
+)
+def schedule_return(self, user_id_str: str, chat_id_str: str, original_message: str, activity: str):
+    asyncio.run(_do_return(user_id_str, chat_id_str, original_message, activity))
+
+async def _do_return(user_id_str: str, chat_id_str: str, original_message: str, activity: str) -> None:
+    await ensure_db_pool()
+    user_id = UUID(user_id_str)
+
+    # Проверить что сообщение всё ещё pending (пользователь не написал сам)
+    pending = await redis.get(f"busy_pending:{user_id}")
+    if not pending:
+        return  # пользователь успел написать снова — не нужно возвращаться
+
+    bot_token = await _get_bot_token_for_user(user_id)
+    if not bot_token:
+        return
+
+    # Отправить "вернулась"
+    import httpx
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    async with httpx.AsyncClient(timeout=10) as http:
+        await http.post(url, json={"chat_id": int(chat_id_str), "text": f"Вернулась! Была {activity} 😊"})
+
+    # Обработать оригинальное сообщение через DialogService
+    from mirror.channels.base import UnifiedMessage
+    unified = UnifiedMessage(
+        global_user_id=user_id_str,
+        text=original_message,
+        channel="telegram",
+        chat_id=chat_id_str,
+        session_id=await _get_session_id(user_id),
+        metadata={"after_busy": True},
+    )
+    from mirror.services.dialog import DialogService
+    response = await dialog_service.handle(unified)
+    await http.post(url, json={"chat_id": int(chat_id_str), "text": response.text})
+
+    await redis.delete(f"busy_pending:{user_id}")
 ```
 
 ---
 
-## Схема БД
+## Схема БД (миграция 025)
 
 ```sql
--- История отправленных инициатив (аналитика + дедупликация)
+-- История отправленных инициатив
 CREATE TABLE proactive_log (
     id           BIGSERIAL PRIMARY KEY,
-    user_id      UUID REFERENCES users(id),
+    user_id      UUID REFERENCES users(user_id) ON DELETE CASCADE,
     type         VARCHAR(50) NOT NULL,
-    score        FLOAT,
-    delivered    BOOLEAN DEFAULT FALSE,
-    opened       BOOLEAN DEFAULT FALSE,  -- пользователь ответил
+    score        FLOAT CHECK (score >= 0.0 AND score <= 1.0),
+    delivered    BOOLEAN DEFAULT FALSE NOT NULL,
+    opened       BOOLEAN DEFAULT FALSE NOT NULL,
     created_at   TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX ON proactive_log (user_id, created_at DESC);
-CREATE INDEX ON proactive_log (type, created_at DESC);
+CREATE INDEX idx_proactive_log_user ON proactive_log (user_id, created_at DESC);
+CREATE INDEX idx_proactive_log_type ON proactive_log (type, created_at DESC);
 
 -- Настройки проактивности пользователя
 ALTER TABLE user_profiles
-  ADD COLUMN proactive_mode       VARCHAR(20) DEFAULT 'normal',  -- quiet|normal|active
-  ADD COLUMN quiet_hours_start    TIME DEFAULT '23:00',
-  ADD COLUMN quiet_hours_end      TIME DEFAULT '08:00',
-  ADD COLUMN busy_probability     FLOAT DEFAULT 0.03;
+  ADD COLUMN proactive_mode       VARCHAR(20) DEFAULT 'normal'
+                                    CHECK (proactive_mode IN ('quiet', 'normal', 'active')),
+  ADD COLUMN quiet_hours_start    TIME DEFAULT '23:00:00',
+  ADD COLUMN quiet_hours_end      TIME DEFAULT '08:00:00',
+  ADD COLUMN busy_probability     FLOAT DEFAULT 0.03
+                                    CHECK (busy_probability >= 0.0 AND busy_probability <= 1.0);
+```
+
+### daily_ritual и ProactiveOrchestrator
+
+Существующий `send_daily_rituals` Celery task (в `mirror/workers/tasks/daily_ritual.py`) **остаётся без изменений**.  
+ProactiveOrchestrator добавляет тип `daily_ritual` как отдельный candidate, но **не дублирует** логику отправки — вместо этого делегирует в `DailyRitualService`. Если daily_ritual уже был отправлен сегодня (проверка по `daily_ritual_log`) — candidate не создаётся.
+
+---
+
+## Новые конфиги (app_config, seed в миграции 020)
+
+| Ключ | Default | Описание |
+|------|---------|---------|
+| `proactive_score_threshold` | `0.5` | Порог score для отправки |
+| `proactive_daily_limit` | `2` | Лимит инициатив в сутки |
+
+```sql
+INSERT INTO app_config (key, value) VALUES
+  ('proactive_score_threshold', '0.5'),
+  ('proactive_daily_limit', '2')
+ON CONFLICT (key) DO NOTHING;
 ```
 
 ---
@@ -207,58 +422,40 @@ ALTER TABLE user_profiles
 
 ---
 
-## Celery tasks
+## Redis ключи
 
-```python
-# Каждые 30 минут
-@app.task
-async def run_proactive_orchestrator():
-    await ProactiveOrchestrator().run()
-
-# По расписанию (delayed task через apply_async countdown)
-@app.task
-async def schedule_return(user_id: str, original_message: str, activity: str):
-    """Отправляет возврат после «занятости» и обрабатывает оригинальное сообщение."""
-    # 1. Найти bot и chat_id пользователя через channel_identities
-    bot, chat_id = await _get_bot_and_chat(user_id)
-    if not bot:
-        return  # пользователь удалён
-    # 2. Отправить "вернулась"
-    await bot.send_message(chat_id, f"Вернулась! Была {activity} 😊")
-    # 3. Обработать оригинальное сообщение через DialogService как обычное
-    unified = UnifiedMessage(
-        global_user_id=user_id, text=original_message,
-        channel="telegram", chat_id=str(chat_id),
-        session_id=await _get_session_id(user_id),
-        metadata={"after_busy": True},
-    )
-    response = await dialog_service.handle(unified)
-    await adapter.send(response, bot)
-    # 4. Убрать pending ключ
-    await redis.delete(f"busy_pending:{user_id}")
-```
+| Ключ | Тип | TTL | Значение |
+|------|-----|-----|---------|
+| `proactive:last_sent:{user_id}:{type}` | STRING | cooldown_hours × 3600 | ISO timestamp UTC |
+| `proactive:daily_count:{user_id}:{YYYY-MM-DD}` | STRING | 86400 | integer (count) |
+| `proactive:ignored_streak:{user_id}` | STRING | 604800 (7д) | integer (streak count) |
+| `busy_pending:{user_id}` | STRING | 2400 | original message text |
 
 ---
 
 ## Файлы к созданию / изменению
 
-- `mirror/services/proactive/orchestrator.py` — ProactiveOrchestrator (новый)
-- `mirror/services/proactive/candidates.py` — скоринг кандидатов (новый)
-- `mirror/services/proactive/busy.py` — BusyBehavior (новый)
-- `mirror/channels/telegram/handlers.py` — вызов BusyBehavior.maybe_intercept перед handle_message
-- `mirror/workers/tasks/proactive.py` — Celery tasks (новый)
-- `mirror/db/migrations/versions/024_proactive.py` — миграция
-- `mirror/db/seeds/llm_routing_stage2.py` — новые task_kinds
+| Файл | Действие |
+|------|---------|
+| `mirror/services/proactive/orchestrator.py` | Создать — ProactiveOrchestrator |
+| `mirror/services/proactive/candidates.py` | Создать — скоринг кандидатов |
+| `mirror/services/proactive/busy.py` | Создать — BusyBehavior |
+| `mirror/channels/telegram/handlers.py` | Изменить — вызов BusyBehavior.maybe_intercept перед handle_message; обработка /quiet и /active |
+| `mirror/workers/tasks/proactive.py` | Создать — Celery tasks |
+| `mirror/workers/celery_app.py` | Изменить — добавить beat schedule |
+| `mirror/db/migrations/versions/025_proactive.py` | Создать — миграция |
+| `mirror/db/seeds/llm_routing_stage2.py` | Дополнить |
 
 ---
 
 ## Definition of Done
 
-- [ ] Smoke-тест: пользователь молчит 3 дня → emotional_checkin отправляется
-- [ ] Smoke-тест: `/quiet` → инициативные сообщения прекращаются
-- [ ] Smoke-тест: 3 игнорирования подряд → частота снижается
-- [ ] Smoke-тест: тихие часы (23:00-08:00) — сообщения не отправляются
-- [ ] Smoke-тест: busy=True → через 5-40 мин приходит возврат
+- [ ] Smoke-тест: пользователь молчит 3 дня → emotional_checkin отправляется (score > 0.5)
+- [ ] Smoke-тест: `/quiet` → proactive_mode='quiet', journal_notifications_enabled=False
+- [ ] Smoke-тест: 3 игнорирования подряд → cooldown удваивается
+- [ ] Smoke-тест: тихие часы 23:00-08:00 — сообщения не отправляются
+- [ ] Smoke-тест: busy_probability=1.0 → каждое сообщение перехватывается → через 5-40 мин приходит возврат
 - [ ] Глобальный лимит 2 сообщения в сутки соблюдается
-- [ ] Policy §3.8: в кризисной ветке busy не срабатывает
+- [ ] risk_level=crisis → BusyBehavior не срабатывает
+- [ ] daily_ritual через ProactiveOrchestrator не дублируется с существующим task
 - [ ] Логирование: `proactive.sent`, `proactive.ignored`, `proactive.busy_triggered`, `proactive.returned`
