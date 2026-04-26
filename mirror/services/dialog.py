@@ -39,9 +39,10 @@ def build_system_prompt(
     tier: str,
     sales_allowed: bool,
     is_first_message: bool = False,
+    is_returning_user: bool = False,
     psych_profile: dict | None = None,
 ) -> str:
-    if is_first_message:
+    if is_first_message and not is_returning_user:
         return get_app_config(
             "onboarding_message",
             "Ты Mirror — тёплый AI-компаньон. Это первое сообщение пользователя. "
@@ -54,6 +55,15 @@ def build_system_prompt(
         "Говори тепло, лично, как близкий друг. Не осуждай. Задавай вдумчивые вопросы.",
     )
     parts = [base]
+    if is_returning_user:
+        parts.append(
+            get_app_config(
+                "returning_user_prompt",
+                "Пользователь возвращается после перерыва. Поприветствуй его тепло — "
+                "покажи что помнишь, упомяни что-то конкретное из того что знаешь о нём "
+                "(из раздела «Что я знаю о тебе» ниже). Не делай вид что видишь его впервые.",
+            )
+        )
 
     # Psychological portrait — shapes tone and approach
     if psych_profile:
@@ -85,6 +95,7 @@ def build_messages(state) -> list[dict]:
         tier=state["tier"],
         sales_allowed=state["sales_allowed"],
         is_first_message=state.get("is_first_message", False),
+        is_returning_user=state.get("is_returning_user", False),
         psych_profile=state.get("psych_profile") or {},
     )
     history = list(state["session_history"])[-10:]
@@ -140,6 +151,7 @@ class DialogService:
             "message": msg.text,
             "tier": tier,
             "is_first_message": msg.is_first_message,
+            "is_returning_user": False,
             "intent": None,
             "intent_conf": None,
             "risk_level": None,
