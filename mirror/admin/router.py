@@ -344,7 +344,6 @@ async def _do_register_bot(request: Request, name: str, token: str) -> dict:
         "tg_id": me.id, "bot_obj": new_bot, "active": True,
         "polling_task": polling_task,
     })
-    request.app.state.bot = new_bot
     return {"username": me.username, "id": me.id}
 
 
@@ -427,11 +426,6 @@ async def remove_tg_bot(name: str, request: Request):
         except Exception:
             pass
     request.app.state.tg_bots = [b for b in bots if b["name"] != name]
-    # If deleted bot was app.state.bot, switch to next available
-    if bot_obj and bot_obj is getattr(request.app.state, "bot", None):
-        remaining = request.app.state.tg_bots
-        if remaining:
-            request.app.state.bot = remaining[-1].get("bot_obj") or request.app.state.bot
     async with db_module.async_session_factory() as session:
         await session.execute(text("DELETE FROM tg_bots WHERE name=:name"), {"name": name})
         await session.commit()
