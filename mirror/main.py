@@ -240,12 +240,13 @@ async def lifespan(app: FastAPI):
     app.state.bot = bot  # keep primary bot reference
 
     if settings.polling_mode:
-        # Main bot already connected via _connect_bot above; start the named poller for logs
+        # Each bot already has its own _bot_polling_loop task started via _connect_bot.
+        # We do NOT use dp.start_polling() — it can't be cancelled per-bot and ignores
+        # admin-panel deletions. Per-bot tasks in app.state.tg_bots are the only pollers.
         try:
             await bot.delete_webhook(drop_pending_updates=True)
         except Exception as e:
             logger.warning("telegram.delete_webhook_failed", error=str(e))
-        _polling_task = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
         logger.info("telegram.polling_started")
     else:
         from mirror.channels.telegram.webhook import make_webhook_router
@@ -275,14 +276,20 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
     logger.info("mirror.shutdown")
-    if _polling_task:
-        _polling_task.cancel()
+    # Cancel all per-bot polling tasks
+    for _entry in getattr(app.state, "tg_bots", []):
+        _t = _entry.get("polling_task")
+        if _t:
+            _t.cancel()
+            try:
+                await _t
+            except (asyncio.CancelledError, Exception):
+                pass
+    if not settings.polling_mode:
         try:
-            await _polling_task
-        except asyncio.CancelledError:
+            await bot.delete_webhook()
+        except Exception:
             pass
-    else:
-        await bot.delete_webhook()
 
     await bot.session.close()
     await redis_client.aclose()
