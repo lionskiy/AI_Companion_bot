@@ -64,7 +64,7 @@ _ssh_remote <<REMOTE
   docker compose -f docker-compose.prod.yml run --rm mirror_api alembic upgrade head
 
   echo "--> рестарт сервисов..."
-  docker compose -f docker-compose.prod.yml up -d
+  docker compose -f docker-compose.prod.yml up -d --force-recreate mirror_api
 
   echo "--> статус..."
   docker compose -f docker-compose.prod.yml ps

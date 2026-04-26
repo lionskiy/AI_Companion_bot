@@ -21,13 +21,13 @@ def make_webhook_router(dp, bot) -> APIRouter:
             raise HTTPException(status_code=403)
         bots = getattr(request.app.state, "tg_bots", [])
         entry = next((b for b in bots if str(b.get("tg_id")) == bot_id), None)
-        active_bot = (
-            (entry["bot_obj"] if entry and entry.get("bot_obj") else None)
-            or getattr(request.app.state, "bot", bot)
-        )
+        if entry is None or not entry.get("bot_obj"):
+            # Bot deleted or not yet registered — acknowledge but don't process.
+            # Telegram may keep retrying for a few seconds after delete_webhook().
+            return {"ok": True}
         data = await request.json()
         update = Update(**data)
-        await dp.feed_update(active_bot, update)
+        await dp.feed_update(entry["bot_obj"], update)
         return {"ok": True}
 
     # Legacy single-segment route kept for backward compat / polling-mode fallback.
