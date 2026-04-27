@@ -71,17 +71,25 @@ def build_dialog_graph(
             memory_service.search(uid, state["message"]),
             search_psych_knowledge(state["message"], llm_router, profile_context=profile_ctx),
         )
-        return {
+        updates: dict = {
             "session_history": session_history,
             "memory_context": memory_context,
             "psych_chunks": psych_chunks,
             "psych_profile": psych_profile,
+            "is_returning_user": False,
         }
+        # /start from a known user — warm return instead of onboarding
+        if state.get("is_first_message") and (
+            memory_context.get("facts") or memory_context.get("episodes")
+        ):
+            updates["intent"] = "returning_start"
+            updates["is_returning_user"] = True
+        return updates
 
     async def generate_response_node(state: DialogState) -> dict:
         intent = state.get("intent") or "chat"
 
-        if intent == "onboarding":
+        if intent in ("onboarding", "returning_start"):
             response = await _chat_response(state, llm_router)
         elif intent == "astrology" and astrology_service is not None:
             response = await astrology_service.handle(state)
