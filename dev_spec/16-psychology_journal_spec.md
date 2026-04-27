@@ -52,7 +52,44 @@ class PsychologyService:
     def __init__(self, llm_router, memory_service, redis_client) -> None: ...
 
     async def handle(self, state: DialogState) -> str:
-        """Диспетчер: определяет sub-intent из state['message'] и вызывает нужный handle_*."""
+        """
+        Диспетчер: определяет практику из текущего Redis-состояния или нового запроса.
+        Всегда проверяет policy перед продолжением практики.
+        """
+        import json
+        uid = UUID(state["user_id"])
+
+        # 1. Policy-check — кризис прерывает любую практику
+        policy_result = await policy_engine.check(uid, state["message"])
+        if policy_result.blocked or policy_result.risk_level == "crisis":
+            await self.cancel(uid)
+            logger.info("psychology.crisis_interrupted", user_id=str(uid))
+            return policy_result.crisis_response
+
+        # 2. Продолжить текущую практику из Redis
+        existing = await self._redis.get(f"practice_state:{uid}")
+        if existing:
+            data = json.loads(existing)
+            practice = data.get("practice")
+            if practice == "cbt":
+                return await self.handle_cbt(state)
+            elif practice == "wheel":
+                return await self.handle_wheel(state)
+            elif practice == "values":
+                return await self.handle_values(state)
+            elif practice == "narrative":
+                return await self.handle_narrative(state)
+
+        # 3. Определить новую практику из текста сообщения
+        msg = state.get("message", "").lower()
+        if any(kw in msg for kw in ["колесо", "баланс", "сферы жизни"]):
+            return await self.handle_wheel(state)
+        elif any(kw in msg for kw in ["ценности", "важно для меня", " act "]):
+            return await self.handle_values(state)
+        elif any(kw in msg for kw in ["нарратив", "переписать историю", "переосмыслить"]):
+            return await self.handle_narrative(state)
+        else:
+            return await self.handle_cbt(state)  # default: CBT дневник мыслей
 
     async def handle_cbt(self, state: DialogState) -> str:
         """CBT-дневник. Использует Redis practice_state:{user_id} для хранения шага."""
@@ -111,6 +148,40 @@ class JournalService:
         LLM (task_kind='journal_monthly_synthesis') агрегирует journal-эпизоды за месяц.
         Сохраняет результат как эпизод source_mode='journal_synthesis'.
         """
+
+    async def handle(self, state: DialogState) -> str:
+        """
+        Диспетчер для intent='journal' и 'reflection'.
+        Определяет действие из текста сообщения.
+        """
+        msg = state.get("message", "").lower()
+        uid = UUID(state["user_id"])
+
+        if any(kw in msg for kw in ["что я писал", "найди запись", "поищи в дневнике"]):
+            results = await self.search_entries(uid, state["message"])
+            if not results:
+                return "Подходящих записей не нашла."
+            return "Вот что нашла в твоём дневнике:\n\n" + "\n---\n".join(results[:3])
+
+        if any(kw in msg for kw in ["рефлексия", "итоги дня", "вечерний вопрос"]):
+            return await self.evening_reflection_prompt(uid)
+
+        # Default: сохранить как свободную запись и проанализировать настроение
+        await self.save_entry(uid, state["message"], source="journal")
+        mood = await self._analyze_mood(uid, state["message"])
+        mood_str = f" Настроение: {mood}." if mood else ""
+        return f"Записала в дневник ✍️{mood_str}"
+
+    async def _analyze_mood(self, user_id: UUID, text: str) -> str | None:
+        """LLM (task_kind='journal_analyze') — одно слово настроения. None при ошибке."""
+        try:
+            return await self._llm_router.complete(
+                task_kind="journal_analyze",
+                messages=[{"role": "user", "content": text}],
+            )
+        except Exception:
+            logger.warning("journal.mood_analyze_failed", user_id=str(user_id))
+            return None
 ```
 
 ### Интеграция в dialog_graph.py
@@ -228,6 +299,63 @@ async def _dispatch_evening_reflections():
 
 Поле `journal_evening_time` — тип `TIME` (без TZ), хранит время по часовому поясу пользователя. При сравнении используется `user.timezone` для конвертации текущего UTC в локальное время.
 
+### Celery task send_evening_reflection
+
+```python
+@celery_app.task(name="mirror.workers.tasks.journal.send_evening_reflection")
+def send_evening_reflection(user_id_str: str):
+    asyncio.run(_do_evening_reflection(user_id_str))
+
+async def _do_evening_reflection(user_id_str: str) -> None:
+    await ensure_db_pool()
+    user_id = UUID(user_id_str)
+
+    # Идемпотентность: не отправлять дважды в один день
+    sent_key = f"journal:evening_sent:{user_id}:{date.today().isoformat()}"
+    if await redis.exists(sent_key):
+        return
+
+    from mirror.services.journal import JournalService
+    journal_svc = JournalService(
+        llm_router=_get_llm_router(),
+        memory_service=_get_memory_service(),
+        redis_client=redis,
+    )
+    question = await journal_svc.evening_reflection_prompt(user_id)
+
+    # Отправить через Telegram HTTP API
+    bot_token = await _get_bot_token_for_user(user_id)
+    if not bot_token:
+        return
+    async with get_session() as session:
+        row = await session.execute(
+            select(ChannelIdentity.channel_user_id)
+            .where(ChannelIdentity.user_id == user_id)
+            .where(ChannelIdentity.channel == "telegram")
+        )
+        identity = row.first()
+    if not identity:
+        return
+    import httpx
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    async with httpx.AsyncClient(timeout=10) as http:
+        await http.post(url, json={"chat_id": int(identity.channel_user_id), "text": question})
+
+    await redis.setex(sent_key, 86400, "1")
+    logger.info("journal.evening_reflection_sent", user_id=user_id_str)
+```
+
+### Команда /cancel (telegram/handlers.py)
+
+```python
+@router.message(Command("cancel"))
+async def handle_cancel(message: Message) -> None:
+    uid = await _get_user_id(message)
+    # Очищаем Redis-состояние практики (PsychologyService и JournalService рефлексия)
+    await redis.delete(f"practice_state:{uid}")
+    await message.answer("Практика отменена. Чем ещё могу помочь?")
+```
+
 ---
 
 ## Схема БД (миграция 023)
@@ -314,8 +442,9 @@ CREATE INDEX idx_life_wheel_user_time ON life_wheel_snapshots (user_id, created_
 | `mirror/services/journal.py` | Создать — JournalService |
 | `mirror/services/intent_router.py` | Изменить — добавить intents `psychology`, `journal`, `reflection` |
 | `mirror/services/dialog_graph.py` | Изменить — routing на новые сервисы |
-| `mirror/channels/telegram/handlers.py` | Изменить — `/cancel` command handler |
-| `mirror/workers/tasks/journal.py` | Создать — Celery tasks |
+| `mirror/channels/telegram/handlers.py` | Изменить — `/cancel` command handler; `/quiet`-связь с journal_notifications_enabled |
+| `mirror/models/user.py` | Изменить — добавить поля UserProfile: `journal_evening_time`, `journal_notifications_enabled` (соответствуют миграции 023) |
+| `mirror/workers/tasks/journal.py` | Создать — Celery tasks (check_evening_reflections, send_evening_reflection, generate_monthly_synthesis) |
 | `mirror/db/migrations/versions/023_psychology_journal.py` | Создать — миграция |
 | `mirror/db/seeds/llm_routing_stage2.py` | Дополнить |
 

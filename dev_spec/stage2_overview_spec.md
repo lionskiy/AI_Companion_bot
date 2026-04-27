@@ -231,6 +231,47 @@ COLLECTIONS = {
 
 ---
 
+## Обязательное изменение mirror/models/user.py
+
+> **КРИТИЧНО:** Этот файл НИКОГДА не перечислен в таблицах "Файлы к созданию/изменению" каждого ТЗ, но без его обновления любой код, обращающийся к полям UserProfile, упадёт с `AttributeError` при старте SQLAlchemy. Обновить **один раз** в начале этапа 2 (после миграции 020, до реализации модулей).
+
+### Новые поля UserProfile (сводная таблица по миграциям)
+
+```python
+# mirror/models/user.py — в класс UserProfile добавить:
+
+# Миграция 021 (module 13 — golden moment / onboarding)
+golden_moment_pending  = Column(Boolean, default=False, nullable=False)
+golden_moment_shown_at = Column(TIMESTAMPTZ, nullable=True)
+preferred_name         = Column(String(100), nullable=True)
+partner_birth_date     = Column(Date, nullable=True)
+registered_at          = Column(TIMESTAMPTZ, nullable=True)  # заполнить NOW() для существующих
+
+# Миграция 022 (module 15 — numerology)
+life_path_number = Column(SmallInteger, nullable=True)
+# CHECK constraint задан в миграции; в модели контролируется через validate_life_path_number
+
+# Миграция 023 (module 16 — psychology / journal)
+journal_evening_time          = Column(Time, default=time(21, 0), nullable=True)
+journal_notifications_enabled = Column(Boolean, default=True, nullable=False)
+
+# Миграция 025 (module 18 — proactive)
+proactive_mode      = Column(String(20), default='normal', nullable=False)
+                      # CHECK: IN ('quiet','normal','active') — задан в миграции
+quiet_hours_start   = Column(Time, default=time(23, 0), nullable=True)
+quiet_hours_end     = Column(Time, default=time(8, 0), nullable=True)
+busy_probability    = Column(Float, default=0.03, nullable=True)
+```
+
+Импорты, которые нужно добавить в `user.py`:
+```python
+from datetime import time
+from sqlalchemy import Boolean, Date, Float, SmallInteger, String, Time
+from sqlalchemy.dialects.postgresql import TIMESTAMPTZ
+```
+
+---
+
 ## Acceptance Criteria этапа 2 (DoD)
 
 - [ ] Все 6 модулей реализованы и покрыты smoke-тестами

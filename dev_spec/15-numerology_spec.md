@@ -96,12 +96,13 @@ class NumerologyCalculator:
 ```
 
 Тест-векторы (обязательно проверить):
-- `life_path(date(1990, 3, 15))` → `1` (6+3+1=10→1)
-- `life_path(date(1985, 11, 29))` → `11` (мастер-число, не сводится: 2+2+7=11)
+- `life_path(date(1990, 3, 15))` → `1`  (day=15→6, month=3→3, year=1990→19→1; 6+3+1=10→1)
+- `life_path(date(1985, 11, 29))` → `9`  (day=29→11(master), month=11→11(master), year=1985→23→5; 11+11+5=27→9)
+- `life_path(date(2002, 3, 4))`  → `11` (day=4, month=3, year=2002→4; 4+3+4=11, master, не сводится)
 - `name_number("Анна")` → `1+5+5+1=12 → 3`
 - `reduce(22)` → `22` (мастер-число)
 - `reduce(33)` → `33` (мастер-число)
-- `reduce(44)` → `8` (не мастер-число)
+- `reduce(44)` → `8` (не мастер-число — 4+4=8)
 
 ### NumerologyService
 
@@ -220,6 +221,7 @@ ALTER TABLE user_profiles
 | `mirror/services/dialog_graph.py` | Изменить — параметр numerology_service + routing |
 | `mirror/channels/telegram/handlers.py` | Изменить — добавить `/numerology` command |
 | `mirror/core/memory/qdrant_init.py` | Изменить — добавить knowledge_numerology |
+| `mirror/models/user.py` | Изменить — добавить поле UserProfile: `life_path_number` (соответствует миграции 022) |
 | `mirror/db/migrations/versions/022_numerology.py` | Создать — миграция |
 | `mirror/db/seeds/llm_routing_stage2.py` | Дополнить |
 | `resourses/knowledge_numerology/` | Создать — материалы для ingest |
@@ -229,7 +231,8 @@ ALTER TABLE user_profiles
 ## Definition of Done
 
 - [ ] Smoke-тест: `life_path(date(1990,3,15))` → 1
-- [ ] Smoke-тест: `life_path(date(1985,11,29))` → 11 (мастер-число)
+- [ ] Smoke-тест: `life_path(date(1985,11,29))` → 9 (не 11! day+month=22, year=5 → total=27→9)
+- [ ] Smoke-тест: `life_path(date(2002,3,4))` → 11 (мастер-число: 4+3+4=11)
 - [ ] Smoke-тест: пользователь пишет «моё число судьбы» → получает полный расчёт
 - [ ] Smoke-тест: без даты рождения → бот спрашивает
 - [ ] Коллекция knowledge_numerology создана и заполнена (минимум числа 1-9 + 11, 22, 33)

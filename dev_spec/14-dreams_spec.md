@@ -35,7 +35,11 @@
 
 ```python
 class DreamsService:
-    def __init__(self, llm_router, memory_service, astrology_service) -> None: ...
+    def __init__(self, llm_router, memory_service, astrology_service, policy_engine) -> None:
+        """
+        policy_engine — экземпляр PolicyEngine (core/policy/safety.py).
+        Передаётся при сборке в build_dialog_graph() / dependencies.py.
+        """
 
     async def handle(self, state: DialogState) -> str:
         """
@@ -84,8 +88,43 @@ class DreamsService:
         """
         Ищет повторяющиеся образы в memory_facts (fact_type='dream_pattern').
         Возвращает список символов с count >= 3.
-        При 3+ повторениях — обновляет факт (incrememts count), не создаёт дубль.
+        При 3+ повторениях — обновляет факт (increments count), не создаёт дубль.
         """
+
+    async def _llm_interpret(
+        self,
+        state: "DialogState",
+        symbols: list[str],
+        moon_ctx: dict,
+        kb_results: list[dict],
+        patterns: list[str],
+    ) -> str:
+        """
+        LLM (task_kind='dream_interpret') собирает итоговый ответ.
+        Контекст: символы + kb_results + moon_ctx + transit_context + patterns.
+        При пустом kb_results — интерпретирует только по moon_ctx и символам.
+        """
+        user_id = UUID(state["user_id"])
+        transit_context = {}
+        try:
+            transit_context = await self._astrology_service.get_current_transits(user_id)
+        except Exception:
+            pass  # нет натальной карты — продолжаем без транзитов
+
+        return await self._llm_router.complete(
+            task_kind="dream_interpret",
+            messages=[{
+                "role": "user",
+                "content": json.dumps({
+                    "dream": state["message"],
+                    "symbols": symbols,
+                    "moon": moon_ctx,
+                    "transits": transit_context,
+                    "kb": kb_results,
+                    "recurring_patterns": patterns,
+                }, ensure_ascii=False),
+            }],
+        )
 ```
 
 ### Лунный контекст — источник данных
@@ -98,8 +137,10 @@ from datetime import date, timedelta
 
 def get_moon_context(target_date: date) -> dict:
     try:
-        moon = ephem.Moon(target_date.isoformat())
-        prev_new = ephem.previous_new_moon(target_date.isoformat())
+        # ephem требует формат "YYYY/MM/DD", не ISO "YYYY-MM-DD"
+        date_str = target_date.strftime("%Y/%m/%d")
+        moon = ephem.Moon(date_str)
+        prev_new = ephem.previous_new_moon(date_str)
         lunar_day = int((target_date - prev_new.datetime().date()).days) + 1
         lunar_day = max(1, min(lunar_day, 30))  # clamp 1-30
         phase_pct = float(moon.phase)
@@ -130,11 +171,12 @@ async def handle(self, state: DialogState) -> str:
         return policy_result.crisis_response
 
     symbols = await self.extract_symbols(state["message"])
+    # Пустой список символов не должен блокировать интерпретацию
     moon_ctx = self.get_moon_context(date.today())
-    kb_results = await self.search_dream_kb(symbols)
-    patterns = await self.check_patterns(uid, symbols)
+    kb_results = await self.search_dream_kb(symbols) if symbols else []
+    patterns = await self.check_patterns(uid, symbols) if symbols else []
 
-    # Собираем контекст для LLM
+    # Собираем контекст для LLM (включает transit_context внутри)
     interpretation = await self._llm_interpret(state, symbols, moon_ctx, kb_results, patterns)
 
     # Async сохранение (не блокирует ответ)
@@ -244,10 +286,10 @@ async def handle_dream(message: Message, bot: Bot) -> None:
 
 | Файл | Действие |
 |------|---------|
-| `mirror/services/dreams.py` | Создать — DreamsService |
+| `mirror/services/dreams.py` | Создать — DreamsService (зависимости: llm_router, memory_service, astrology_service, policy_engine) |
 | `mirror/rag/dreams.py` | Создать — search_dream_knowledge |
 | `mirror/services/intent_router.py` | Изменить — добавить intent `dream` с примерами фраз |
-| `mirror/services/dialog_graph.py` | Изменить — routing на DreamsService, параметр dreams_service |
+| `mirror/services/dialog_graph.py` | Изменить — routing на DreamsService, параметр dreams_service; передать policy_engine при инициализации |
 | `mirror/channels/telegram/handlers.py` | Изменить — добавить `/dream` command handler |
 | `mirror/core/memory/qdrant_init.py` | Изменить — добавить knowledge_dreams |
 | `mirror/db/seeds/llm_routing_stage2.py` | Дополнить — новые task_kinds |

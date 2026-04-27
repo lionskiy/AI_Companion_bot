@@ -91,19 +91,23 @@ async def _dispatch_batch(offset: int, batch_size: int) -> None:
 ### ProactiveOrchestrator
 
 ```python
-SCORE_THRESHOLD = float(get_app_config("proactive_score_threshold", "0.5"))
-
 class ProactiveOrchestrator:
+    def __init__(self, llm_router, memory_service) -> None:
+        self._llm_router = llm_router
+        self._memory_service = memory_service
+
     async def process_user(self, user: Row) -> None:
         if not await self._in_quiet_hours(user):
             return
         if await self._daily_limit_reached(user.user_id):
             return
+        # Lazy eval — читаем из БД при каждом вызове, не при импорте
+        threshold = float(get_app_config("proactive_score_threshold", "0.5"))
         candidates = await self._build_candidates(user.user_id)
         if not candidates:
             return
         best = max(candidates, key=lambda c: c.score)
-        if best.score >= SCORE_THRESHOLD:
+        if best.score >= threshold:
             await self._send(user.user_id, best)
 
     async def _in_quiet_hours(self, user: Row) -> bool:
@@ -146,6 +150,23 @@ class ProactiveOrchestrator:
         # Логировать в proactive_log
         await _log_proactive(user_id, candidate.type, candidate.score)
         logger.info("proactive.sent", user_id=str(user_id), type=candidate.type, score=candidate.score)
+
+    async def _compose(self, user_id: UUID, candidate: "ProactiveCandidate") -> str:
+        """Генерирует текст инициативного сообщения через LLM (task_kind='proactive_compose')."""
+        import json
+        memory = await self._memory_service.search(user_id, query=candidate.type, top_k=3)
+        facts_snippet = [f["value"] for f in memory.get("facts", [])[:3]]
+        return await self._llm_router.complete(
+            task_kind="proactive_compose",
+            messages=[{
+                "role": "user",
+                "content": json.dumps({
+                    "type": candidate.type,
+                    "context": candidate.context,
+                    "memory_facts": facts_snippet,
+                }, ensure_ascii=False),
+            }],
+        )
 ```
 
 ### ProactiveCandidate
@@ -248,18 +269,115 @@ async def _check_ignored_streak(user_id: UUID) -> int:
     return streak
 
 # После отправки и отсутствия ответа в течение 24 часов — проверяем:
-# (В следующем batch-запуске через 30 мин, если last_sent < 24h назад и нет reply)
+# Вызывается в начале _dispatch_batch перед process_user для каждого пользователя.
 async def _maybe_increment_ignored_streak(user_id: UUID, candidate_type: str) -> None:
     last_sent = await redis.get(f"proactive:last_sent:{user_id}:{candidate_type}")
     if not last_sent:
         return
     sent_at = datetime.fromisoformat(last_sent)
-    if (datetime.utcnow() - sent_at).total_seconds() > 86400:
-        await redis.incr(f"proactive:ignored_streak:{user_id}")
-        await redis.expire(f"proactive:ignored_streak:{user_id}", 604800)
+    # Игнорирование = прошло > 24h с отправки И пользователь не ответил после отправки
+    if (datetime.utcnow() - sent_at).total_seconds() < 86400:
+        return  # менее 24ч — ещё рано судить
+    # Проверяем: написал ли пользователь что-либо ПОСЛЕ отправки
+    last_reply = await redis.get(f"user:last_message_time:{user_id}")
+    if last_reply:
+        reply_at = datetime.fromisoformat(last_reply)
+        if reply_at > sent_at:
+            return  # пользователь ответил — не игнор
+    # Пользователь не ответил за 24ч — это игнорирование
+    streak_key = f"proactive:ignored_streak:{user_id}"
+    await redis.incr(streak_key)
+    await redis.expire(streak_key, 604800)
+    logger.info("proactive.ignored", user_id=str(user_id), type=candidate_type)
+
+# ВАЖНО: user:last_message_time обновляется в telegram/handlers.py
+# при каждом входящем сообщении от пользователя:
+# await redis.setex(f"user:last_message_time:{uid}", 2592000, datetime.utcnow().isoformat())
+# (TTL 30 дней)
 ```
 
 При `ignored_streak >= 3`: умножить cooldown_hours кандидата на 2. При `ignored_streak >= 6`: умножить на 4. Floor — кандидат с cooldown 72ч при streak=3 не отправляется чаще 1 раза в неделю.
+
+### Вспомогательные функции (mirror/services/proactive/helpers.py)
+
+```python
+async def _get_last_user_message_time(user_id: UUID) -> datetime | None:
+    """Время последнего сообщения от пользователя. Redis-first, DB-fallback."""
+    cached = await redis.get(f"user:last_message_time:{user_id}")
+    if cached:
+        return datetime.fromisoformat(cached)
+    async with get_session() as session:
+        row = await session.execute(
+            select(func.max(MemoryEpisode.created_at)).where(MemoryEpisode.user_id == user_id)
+        )
+        return row.scalar()
+
+async def _get_last_episode(
+    user_id: UUID, exclude_source_modes: list[str]
+) -> "MemoryEpisode | None":
+    async with get_session() as session:
+        row = await session.execute(
+            select(MemoryEpisode)
+            .where(MemoryEpisode.user_id == user_id)
+            .where(MemoryEpisode.source_mode.notin_(exclude_source_modes))
+            .order_by(MemoryEpisode.created_at.desc())
+            .limit(1)
+        )
+        return row.scalar_one_or_none()
+
+async def _user_has_natal_chart(user_id: UUID) -> bool:
+    async with get_session() as session:
+        row = await session.execute(
+            select(UserProfile.natal_data).where(UserProfile.user_id == user_id)
+        )
+        return bool(row.scalar_one_or_none())
+
+async def _get_profile(user_id: UUID) -> "UserProfile":
+    async with get_session() as session:
+        return await session.get(UserProfile, user_id)
+
+async def _get_bot_token_for_user(user_id: UUID) -> str | None:
+    """Возвращает telegram bot token для пользователя (из таблицы tg_bots)."""
+    async with get_session() as session:
+        row = await session.execute(
+            select(TgBot.token)
+            .join(ChannelIdentity, ChannelIdentity.tg_bot_id == TgBot.id)
+            .where(ChannelIdentity.user_id == user_id)
+            .where(ChannelIdentity.channel == "telegram")
+        )
+        result = row.first()
+    return result.token if result else None
+
+async def _deliver_to_user(user_id: UUID, text: str) -> None:
+    """Отправляет сообщение пользователю через его Telegram bot (HTTP API напрямую)."""
+    async with get_session() as session:
+        row = await session.execute(
+            select(ChannelIdentity.channel_user_id)
+            .where(ChannelIdentity.user_id == user_id)
+            .where(ChannelIdentity.channel == "telegram")
+        )
+        identity = row.first()
+    if not identity:
+        return
+    bot_token = await _get_bot_token_for_user(user_id)
+    if not bot_token:
+        return
+    import httpx
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    async with httpx.AsyncClient(timeout=10) as http:
+        await http.post(url, json={"chat_id": int(identity.channel_user_id), "text": text})
+
+async def _log_proactive(user_id: UUID, proactive_type: str, score: float) -> None:
+    async with get_session() as session:
+        await session.execute(
+            insert(ProactiveLog).values(user_id=user_id, type=proactive_type, score=score)
+        )
+        await session.commit()
+
+async def _get_session_id(user_id: UUID) -> str:
+    """Возвращает session_id для Celery-контекста (нет активной сессии)."""
+    return f"{user_id}:proactive"
+```
 
 ### Механика «занят»
 
@@ -311,9 +429,43 @@ class BusyBehavior:
 ```python
 # В handle_message (обычный текстовый handler) — ПЕРЕД dialog_service.handle():
 uid = UUID(unified.global_user_id)
+
+# Обновляем Redis timestamp — нужен для _maybe_increment_ignored_streak
+await redis.setex(f"user:last_message_time:{uid}", 2592000, datetime.utcnow().isoformat())
+
+# Сбросить ignored_streak — пользователь отвечает, значит видит сообщения
+await _update_ignored_streak(uid)
+
 if await busy_behavior.maybe_intercept(uid, unified.text, bot, message.chat.id):
     return  # сообщение будет обработано позже через schedule_return
+
+# Команды /quiet и /active
+@router.message(Command("quiet"))
+async def handle_quiet(message: Message) -> None:
+    uid = await _get_user_id(message)
+    async with get_session() as session:
+        await session.execute(
+            update(UserProfile)
+            .where(UserProfile.user_id == uid)
+            .values(proactive_mode='quiet', journal_notifications_enabled=False)
+        )
+        await session.commit()
+    await message.answer("Понял, буду тише. Напиши /active чтобы включить снова.")
+
+@router.message(Command("active"))
+async def handle_active(message: Message) -> None:
+    uid = await _get_user_id(message)
+    async with get_session() as session:
+        await session.execute(
+            update(UserProfile)
+            .where(UserProfile.user_id == uid)
+            .values(proactive_mode='active', journal_notifications_enabled=True)
+        )
+        await session.commit()
+    await message.answer("Отлично! Буду на связи активнее 😊")
 ```
+
+**Примечание:** `opened=True` в `proactive_log` — устанавливается при ответе пользователя на инициативное сообщение (future feature). На этапе 2 `opened` всегда FALSE; UPDATE будет добавлен в этапе 3 при наличии reply tracking.
 
 ### Celery task schedule_return
 
@@ -347,6 +499,7 @@ async def _do_return(user_id_str: str, chat_id_str: str, original_message: str, 
 
     # Обработать оригинальное сообщение через DialogService
     from mirror.channels.base import UnifiedMessage
+    from mirror.services.dialog import build_dialog_service_for_celery
     unified = UnifiedMessage(
         global_user_id=user_id_str,
         text=original_message,
@@ -355,8 +508,12 @@ async def _do_return(user_id_str: str, chat_id_str: str, original_message: str, 
         session_id=await _get_session_id(user_id),
         metadata={"after_busy": True},
     )
-    from mirror.services.dialog import DialogService
-    response = await dialog_service.handle(unified)
+    # build_dialog_service_for_celery() — фабрика, создаёт полностью собранный
+    # экземпляр DialogService со всеми зависимостями (аналог dependency injection
+    # из FastAPI/dependencies.py, но для Celery-контекста).
+    # Определяется в mirror/services/dialog.py рядом с build_dialog_graph().
+    dialog_svc = await build_dialog_service_for_celery()
+    response = await dialog_svc.handle(unified)
     await http.post(url, json={"chat_id": int(chat_id_str), "text": response.text})
 
     await redis.delete(f"busy_pending:{user_id}")
@@ -440,7 +597,10 @@ ON CONFLICT (key) DO NOTHING;
 | `mirror/services/proactive/orchestrator.py` | Создать — ProactiveOrchestrator |
 | `mirror/services/proactive/candidates.py` | Создать — скоринг кандидатов |
 | `mirror/services/proactive/busy.py` | Создать — BusyBehavior |
-| `mirror/channels/telegram/handlers.py` | Изменить — вызов BusyBehavior.maybe_intercept перед handle_message; обработка /quiet и /active |
+| `mirror/services/proactive/helpers.py` | Создать — вспомогательные функции (_deliver_to_user, _get_last_user_message_time, _get_last_episode, _user_has_natal_chart, _get_profile, _get_bot_token_for_user, _log_proactive, _get_session_id) |
+| `mirror/services/dialog.py` | Изменить — добавить `build_dialog_service_for_celery()` фабрику |
+| `mirror/models/user.py` | Изменить — добавить поля UserProfile: proactive_mode, quiet_hours_start, quiet_hours_end, busy_probability (соответствуют миграции 025) |
+| `mirror/channels/telegram/handlers.py` | Изменить — вызов BusyBehavior.maybe_intercept перед handle_message; /quiet, /active handlers; обновление user:last_message_time в Redis |
 | `mirror/workers/tasks/proactive.py` | Создать — Celery tasks |
 | `mirror/workers/celery_app.py` | Изменить — добавить beat schedule |
 | `mirror/db/migrations/versions/025_proactive.py` | Создать — миграция |

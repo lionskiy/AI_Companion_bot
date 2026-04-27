@@ -52,6 +52,67 @@ query_text
     → return MemoryContext
 ```
 
+### MemoryService — инициализация с reranker
+
+```python
+# В mirror/core/memory/service.py:
+class MemoryService:
+    def __init__(self, llm_router, qdrant_client, session_factory, redis_client) -> None:
+        self._llm_router = llm_router
+        self._qdrant = qdrant_client
+        self._session_factory = session_factory
+        self._redis = redis_client
+        reranker_type = get_app_config("reranker_type", "disabled")
+        self._reranker = get_reranker(reranker_type)
+        self._budget = ContextBudget()
+```
+
+### Строковое представление кандидатов для reranker
+
+Reranker.score() принимает `list[str]` — каждый элемент должен быть текстовым представлением факта/эпизода:
+- Факт: `f"{item['key']}: {item['value']}"` (строка из payload Qdrant)
+- Эпизод: `item.get("summary", "")` (поле summary из payload)
+
+### _search_facts_raw() — вспомогательный метод
+
+```python
+async def _search_facts_raw(
+    self, user_id: UUID, embedding: list[float], top_k: int = 5
+) -> list[dict]:
+    """
+    Сырой поиск по Qdrant без reranking и scoring.
+    Возвращает list[{"id": str, "score": float, "key": str, "value": str, ...}].
+    Используется для дедупликации в write_fact().
+    """
+    results = await self._qdrant.search(
+        collection_name="user_facts",
+        query_vector=embedding,
+        query_filter={"must": [{"key": "user_id", "match": {"value": str(user_id)}}]},
+        limit=top_k,
+        with_payload=True,
+    )
+    return [{"id": str(r.id), "score": r.score, **r.payload} for r in results]
+```
+
+### Вычисление final_score в search()
+
+```python
+# После получения raw результатов от Qdrant и reranker scores:
+fact_texts = [f"{f['key']}: {f['value']}" for f in raw_facts]
+ep_texts   = [ep.get("summary", "") for ep in raw_episodes]
+
+rerank_fact_scores = await self._reranker.score(query, fact_texts)
+rerank_ep_scores   = await self._reranker.score(query, ep_texts)
+
+for fact, rs in zip(raw_facts, rerank_fact_scores):
+    fact["final_score"] = fact["score"] * rs * fact.get("importance", 0.5)
+
+for ep, rs in zip(raw_episodes, rerank_ep_scores):
+    ep["final_score"] = ep["score"] * rs * ep.get("importance", 0.5)
+
+logger.info("memory.search.reranked", user_id=str(user_id), facts=len(raw_facts), episodes=len(raw_episodes))
+```
+
 ### Reranker — три реализации
 
 ```python
@@ -168,7 +229,18 @@ if not existing:
         if candidate["score"] > float(get_app_config("fact_dedup_threshold", "0.92")):
             # Дубль найден — обновляем вместо создания
             existing_id = candidate["id"]
-            # ... обновить fact_type, value, importance если нужно
+            async with async_session_factory() as s:
+                await s.execute(
+                    text("""
+                        UPDATE memory_facts
+                        SET value = :value,
+                            importance = GREATEST(importance, :importance),
+                            updated_at = NOW()
+                        WHERE id = :id
+                    """),
+                    {"value": value, "importance": importance or 0.5, "id": existing_id},
+                )
+                await s.commit()
             logger.info("memory.fact.deduplicated", user_id=str(user_id))
             return existing_id
 ```
@@ -185,7 +257,9 @@ async def _update_access_stats(self, fact_ids: list[str]) -> None:
                 text("""
                     UPDATE memory_facts
                     SET access_count = access_count + 1,
-                        last_accessed = NOW()
+                        last_accessed = NOW(),
+                        -- +0.05 за каждое обращение, cap 1.0
+                        importance = LEAST(1.0, importance + 0.05)
                     WHERE id = ANY(:ids)
                 """),
                 {"ids": fact_ids},
@@ -239,9 +313,10 @@ ALTER TABLE memory_facts
   ADD COLUMN last_accessed  TIMESTAMPTZ;
 
 -- Индекс для pinned facts (быстрый доступ к важным фактам):
+-- Примечание: поля `archived` в memory_facts нет — используем только deleted_at
 CREATE INDEX idx_memory_facts_pinned
   ON memory_facts (user_id, importance DESC)
-  WHERE archived = FALSE AND deleted_at IS NULL;
+  WHERE deleted_at IS NULL;
 
 -- Индекс для decay task (факты не обращались к которым):
 CREATE INDEX idx_memory_facts_stale
@@ -287,7 +362,7 @@ ON CONFLICT (key) DO NOTHING;
 | `mirror/core/memory/reranker.py` | Создать — BaseReranker, LLMReranker, CrossEncoderReranker, DisabledReranker, get_reranker() |
 | `mirror/core/memory/context_budget.py` | Создать — ContextBudget |
 | `mirror/core/memory/service.py` | **Изменить** — интеграция reranker + budget в search(); дедупликация в write_fact(); _update_access_stats() |
-| `mirror/workers/tasks/memory.py` | Изменить — добавить decay_fact_importance task |
+| `mirror/workers/tasks/memory.py` | Создать (файла нет) или Изменить — добавить decay_fact_importance task |
 | `mirror/db/migrations/versions/024_memory_facts_access.py` | Создать — миграция |
 | `mirror/db/seeds/llm_routing_stage2.py` | Дополнить — task_kind 'rerank' + app_config keys |
 
