@@ -34,23 +34,23 @@ def upgrade() -> None:
 
     # 3. Seed new llm_routing rows for Stage 2 task_kinds
     op.execute("""
-        INSERT INTO llm_routing (task_kind, provider, model, max_tokens, temperature, fallback_chain)
+        INSERT INTO llm_routing (task_kind, tier, provider_id, model_id, max_tokens, temperature, fallback_chain)
         VALUES
-          ('dream_extract_symbols',    'openai', 'gpt-4o-mini', 500,  0.0, '["gpt-4o-mini"]'),
-          ('dream_interpret',          'openai', 'gpt-4o',      1500, 0.8, '["gpt-4o","gpt-4o-mini"]'),
-          ('numerology_interpret',     'openai', 'gpt-4o-mini', 1000, 0.7, '["gpt-4o-mini"]'),
-          ('psychology_cbt',           'openai', 'gpt-4o',      1500, 0.7, '["gpt-4o","gpt-4o-mini"]'),
-          ('psychology_values',        'openai', 'gpt-4o-mini', 1000, 0.7, '["gpt-4o-mini"]'),
-          ('psychology_narrative',     'openai', 'gpt-4o',      1500, 0.8, '["gpt-4o","gpt-4o-mini"]'),
-          ('life_wheel',               'openai', 'gpt-4o-mini', 1000, 0.6, '["gpt-4o-mini"]'),
-          ('journal_analyze',          'openai', 'gpt-4o-mini', 800,  0.5, '["gpt-4o-mini"]'),
-          ('journal_monthly_synthesis','openai', 'gpt-4o',      2000, 0.7, '["gpt-4o","gpt-4o-mini"]'),
-          ('golden_moment',            'openai', 'gpt-4o',      1500, 0.9, '["gpt-4o","gpt-4o-mini"]'),
-          ('onboarding_question',      'openai', 'gpt-4o-mini', 300,  0.7, '["gpt-4o-mini"]'),
-          ('rerank',                   'openai', 'gpt-4o-mini', 500,  0.0, '["gpt-4o-mini"]'),
-          ('proactive_compose',        'openai', 'gpt-4o-mini', 500,  0.8, '["gpt-4o-mini"]'),
-          ('proactive_return',         'openai', 'gpt-4o-mini', 500,  0.8, '["gpt-4o-mini"]')
-        ON CONFLICT (task_kind) DO NOTHING
+          ('dream_extract_symbols',    '*', 'openai', 'gpt-4o-mini', 500,  0.0, '["gpt-4o-mini"]'),
+          ('dream_interpret',          '*', 'openai', 'gpt-4o',      1500, 0.8, '["gpt-4o","gpt-4o-mini"]'),
+          ('numerology_interpret',     '*', 'openai', 'gpt-4o-mini', 1000, 0.7, '["gpt-4o-mini"]'),
+          ('psychology_cbt',           '*', 'openai', 'gpt-4o',      1500, 0.7, '["gpt-4o","gpt-4o-mini"]'),
+          ('psychology_values',        '*', 'openai', 'gpt-4o-mini', 1000, 0.7, '["gpt-4o-mini"]'),
+          ('psychology_narrative',     '*', 'openai', 'gpt-4o',      1500, 0.8, '["gpt-4o","gpt-4o-mini"]'),
+          ('life_wheel',               '*', 'openai', 'gpt-4o-mini', 1000, 0.6, '["gpt-4o-mini"]'),
+          ('journal_analyze',          '*', 'openai', 'gpt-4o-mini', 800,  0.5, '["gpt-4o-mini"]'),
+          ('journal_monthly_synthesis','*', 'openai', 'gpt-4o',      2000, 0.7, '["gpt-4o","gpt-4o-mini"]'),
+          ('golden_moment',            '*', 'openai', 'gpt-4o',      1500, 0.9, '["gpt-4o","gpt-4o-mini"]'),
+          ('onboarding_question',      '*', 'openai', 'gpt-4o-mini', 300,  0.7, '["gpt-4o-mini"]'),
+          ('rerank',                   '*', 'openai', 'gpt-4o-mini', 500,  0.0, '["gpt-4o-mini"]'),
+          ('proactive_compose',        '*', 'openai', 'gpt-4o-mini', 500,  0.8, '["gpt-4o-mini"]'),
+          ('proactive_return',         '*', 'openai', 'gpt-4o-mini', 500,  0.8, '["gpt-4o-mini"]')
+        ON CONFLICT (task_kind, tier) DO NOTHING
     """)
 
     # 4. Seed new app_config entries
