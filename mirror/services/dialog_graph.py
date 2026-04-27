@@ -11,6 +11,10 @@ HELP_TEXT = """Я умею:
 🔮 Таро — расклады и интерпретации
 ⭐ Астрология — натальная карта и транзиты
 🌅 Ежедневный ритуал — карта дня и аффирмация
+🌙 Сонник — толкование снов
+🔢 Нумерология — число судьбы и личный год
+🧠 Психология — CBT, колесо жизни, ценности
+📓 Дневник — записи и вечерняя рефлексия
 💬 Просто поговорить
 
 Напиши что тебя интересует."""
@@ -31,6 +35,10 @@ def build_dialog_graph(
     astrology_service=None,
     tarot_service=None,
     daily_ritual_service=None,
+    dreams_service=None,
+    numerology_service=None,
+    psychology_service=None,
+    journal_service=None,
 ):
     async def classify_intent_node(state: DialogState) -> dict:
         if state.get("is_first_message"):
@@ -97,9 +105,19 @@ def build_dialog_graph(
             response = await tarot_service.handle(state)
         elif intent == "daily_ritual" and daily_ritual_service is not None:
             response = await daily_ritual_service.handle(state)
+        elif intent == "dream" and dreams_service is not None:
+            response = await dreams_service.handle(state)
+        elif intent == "numerology" and numerology_service is not None:
+            response = await numerology_service.handle(state)
+        elif intent in ("psychology",) and psychology_service is not None:
+            response = await psychology_service.handle(state)
+        elif intent in ("journal", "reflection") and journal_service is not None:
+            response = await journal_service.handle(state)
         elif intent == "help":
             response = HELP_TEXT
         elif intent == "cancel":
+            if psychology_service is not None:
+                await psychology_service.cancel(UUID(state["user_id"]))
             response = "Хорошо, давай поговорим о чём-нибудь другом."
         else:
             response = await _chat_response(state, llm_router)

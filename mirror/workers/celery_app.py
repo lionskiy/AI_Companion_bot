@@ -12,6 +12,8 @@ celery_app = Celery(
         "mirror.workers.tasks.daily_ritual",
         "mirror.workers.tasks.profile",
         "mirror.workers.tasks.ingest",
+        "mirror.workers.tasks.journal",
+        "mirror.workers.tasks.proactive",
     ],
 )
 
@@ -27,10 +29,26 @@ celery_app.conf.update(
 celery_app.conf.beat_schedule = {
     "send-daily-rituals": {
         "task": "mirror.workers.tasks.daily_ritual.send_daily_rituals",
-        "schedule": crontab(minute=0),  # каждый час
+        "schedule": crontab(minute=0),
     },
     "cleanup-ingest-logs": {
         "task": "mirror.workers.tasks.ingest.cleanup_ingest_logs",
-        "schedule": crontab(hour=3, minute=0),  # ежедневно в 03:00 UTC
+        "schedule": crontab(hour=3, minute=0),
+    },
+    "check-evening-reflections": {
+        "task": "mirror.workers.tasks.journal.check_evening_reflections",
+        "schedule": crontab(minute="*/15"),
+    },
+    "generate-monthly-synthesis": {
+        "task": "mirror.workers.tasks.journal.generate_monthly_synthesis",
+        "schedule": crontab(hour=4, minute=0, day_of_month=1),
+    },
+    "proactive-dispatch": {
+        "task": "mirror.workers.tasks.proactive.proactive_dispatch_batch",
+        "schedule": crontab(minute="*/30"),
+    },
+    "decay-fact-importance": {
+        "task": "mirror.workers.tasks.memory.decay_fact_importance",
+        "schedule": crontab(hour=2, minute=0),
     },
 }

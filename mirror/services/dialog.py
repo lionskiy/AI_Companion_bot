@@ -123,10 +123,16 @@ def build_messages(state) -> list[dict]:
 
 
 class DialogService:
-    def __init__(self, graph, memory_service, billing_service) -> None:
+    def __init__(self, graph, memory_service, billing_service, golden_moment_service=None) -> None:
         self._graph = graph
         self._memory = memory_service
         self._billing = billing_service
+        self._golden_moment = golden_moment_service
+
+    async def golden_moment_pending(self, user_id: UUID) -> bool:
+        if self._golden_moment is None:
+            return False
+        return await self._golden_moment.is_pending(user_id)
 
     async def handle(self, msg: UnifiedMessage) -> UnifiedResponse:
         t0 = time.monotonic()
@@ -180,6 +186,13 @@ class DialogService:
                 channel=msg.channel,
             )
 
+        # Check golden moment — sets pending flag if conditions met
+        if self._golden_moment is not None and not msg.is_first_message:
+            try:
+                await self._golden_moment.check_and_trigger(uid, final_state)
+            except Exception:
+                logger.warning("golden_moment.check_failed", user_id=msg.global_user_id)
+
         response_text = final_state.get("response") or "Сейчас немного занята, вернусь через минуту ✨"
 
         await self._memory.add_to_session(uid, "user", msg.text)
@@ -229,3 +242,53 @@ class DialogService:
             await set_session_meta(self._memory._redis, uid, current_session_id)
         except Exception:
             logger.warning("dialog.session_meta_failed", user_id=user_id_str)
+
+
+async def build_dialog_service_for_celery() -> "DialogService":
+    """Factory for creating DialogService in Celery tasks (no webhook context)."""
+    import redis.asyncio as aioredis
+    from mirror.config import settings
+    from mirror.core.llm.router import LLMRouter
+    from mirror.core.memory.service import MemoryService
+    from mirror.core.policy.safety import PolicyEngine
+    from mirror.services.astrology import AstrologyService
+    from mirror.services.billing import BillingService
+    from mirror.services.daily_ritual import DailyRitualService
+    from mirror.services.dialog_graph import build_dialog_graph
+    from mirror.services.dreams import DreamsService
+    from mirror.services.golden_moment import GoldenMomentService
+    from mirror.services.intent_router import IntentRouter
+    from mirror.services.journal import JournalService
+    from mirror.services.numerology import NumerologyService
+    from mirror.services.psychology import PsychologyService
+    from mirror.services.tarot import TarotService
+
+    redis_client = aioredis.from_url(settings.redis_url)
+    llm = LLMRouter()
+    memory = MemoryService(redis_client=redis_client, llm_router=llm)
+    policy = PolicyEngine(llm_router=llm)
+    billing = BillingService()
+    intent_router = IntentRouter(llm_router=llm)
+    tarot = TarotService(llm_router=llm)
+    astrology = AstrologyService(llm_router=llm, redis_client=redis_client)
+    ritual = DailyRitualService(tarot_service=tarot, astrology_service=astrology, llm_router=llm)
+    dreams = DreamsService(llm_router=llm, memory_service=memory, astrology_service=astrology, policy_engine=policy)
+    numerology = NumerologyService(llm_router=llm, memory_service=memory)
+    psychology = PsychologyService(llm_router=llm, memory_service=memory, redis_client=redis_client, policy_engine=policy)
+    journal = JournalService(llm_router=llm, memory_service=memory, redis_client=redis_client)
+    golden_moment = GoldenMomentService(redis_client=redis_client, llm_router=llm)
+
+    graph = build_dialog_graph(
+        intent_router=intent_router,
+        policy_engine=policy,
+        memory_service=memory,
+        llm_router=llm,
+        astrology_service=astrology,
+        tarot_service=tarot,
+        daily_ritual_service=ritual,
+        dreams_service=dreams,
+        numerology_service=numerology,
+        psychology_service=psychology,
+        journal_service=journal,
+    )
+    return DialogService(graph=graph, memory_service=memory, billing_service=billing, golden_moment_service=golden_moment)

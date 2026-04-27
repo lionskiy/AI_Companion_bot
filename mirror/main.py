@@ -113,6 +113,59 @@ async def lifespan(app: FastAPI):
         llm_router=llm_router,
     )
 
+    # ── Stage 2 services ──────────────────────────────────────────────────────
+    from mirror.services.dreams import DreamsService
+    dreams_service = DreamsService(
+        llm_router=llm_router,
+        memory_service=memory_service,
+        astrology_service=astro_service,
+        policy_engine=policy_engine,
+    )
+
+    from mirror.services.numerology import NumerologyService
+    numerology_service = NumerologyService(
+        llm_router=llm_router,
+        memory_service=memory_service,
+    )
+
+    from mirror.services.psychology import PsychologyService
+    psychology_service = PsychologyService(
+        llm_router=llm_router,
+        memory_service=memory_service,
+        redis_client=redis_client,
+        policy_engine=policy_engine,
+    )
+
+    from mirror.services.journal import JournalService
+    journal_service = JournalService(
+        llm_router=llm_router,
+        memory_service=memory_service,
+        redis_client=redis_client,
+    )
+
+    from mirror.services.golden_moment import GoldenMomentService
+    golden_moment_service = GoldenMomentService(
+        redis_client=redis_client,
+        llm_router=llm_router,
+    )
+
+    from mirror.services.proactive.busy import BusyBehavior
+    busy_behavior = BusyBehavior(redis_client=redis_client, policy_engine=policy_engine)
+
+    # Wire redis into dependencies for proactive helpers
+    import mirror.dependencies as deps
+    deps.redis_client = redis_client
+    deps.llm_router = llm_router
+    deps.memory_service = memory_service
+    deps.policy_engine = policy_engine
+    deps.astrology_service = astro_service
+    deps.tarot_service = tarot_service
+    deps.daily_ritual_service = ritual_service
+    deps.dreams_service = dreams_service
+    deps.numerology_service = numerology_service
+    deps.psychology_service = psychology_service
+    deps.journal_service = journal_service
+
     from mirror.services.dialog_graph import build_dialog_graph
     graph = build_dialog_graph(
         intent_router=intent_router_svc,
@@ -122,6 +175,10 @@ async def lifespan(app: FastAPI):
         astrology_service=astro_service,
         tarot_service=tarot_service,
         daily_ritual_service=ritual_service,
+        dreams_service=dreams_service,
+        numerology_service=numerology_service,
+        psychology_service=psychology_service,
+        journal_service=journal_service,
     )
 
     from mirror.services.dialog import DialogService
@@ -129,6 +186,7 @@ async def lifespan(app: FastAPI):
         graph=graph,
         memory_service=memory_service,
         billing_service=billing_service,
+        golden_moment_service=golden_moment_service,
     )
 
     # ── Telegram ──────────────────────────────────────────────────────────────
@@ -142,7 +200,14 @@ async def lifespan(app: FastAPI):
         identity_service=identity_service,
         redis_client=redis_client,
     )
-    dp.include_router(make_handlers_router(adapter, dialog_service))
+    dp.include_router(make_handlers_router(
+        adapter,
+        dialog_service,
+        redis_client=redis_client,
+        golden_moment_service=golden_moment_service,
+        busy_behavior=busy_behavior,
+        psychology_service=psychology_service,
+    ))
     app.state.bot = None  # set to first connected bot below
     app.state.dp = dp
 

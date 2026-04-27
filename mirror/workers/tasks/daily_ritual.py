@@ -14,13 +14,16 @@ logger = structlog.get_logger()
 
 
 def _get_services():
+    import redis.asyncio as aioredis
+    from mirror.config import settings
     from mirror.core.llm.router import LLMRouter
     from mirror.services.astrology import AstrologyService
     from mirror.services.daily_ritual import DailyRitualService
     from mirror.services.tarot import TarotService
     llm = LLMRouter()
+    redis_client = aioredis.from_url(settings.redis_url)
     tarot = TarotService(llm_router=llm)
-    astro = AstrologyService(llm_router=llm)
+    astro = AstrologyService(llm_router=llm, redis_client=redis_client)
     return DailyRitualService(tarot_service=tarot, astrology_service=astro, llm_router=llm)
 
 

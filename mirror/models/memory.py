@@ -17,6 +17,7 @@ class MemoryEpisode(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     qdrant_point_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     importance: Mapped[float] = mapped_column(Numeric(4, 3), server_default=text("0.5"))
+    source_mode: Mapped[str] = mapped_column(Text, nullable=False, default="chat", server_default="chat")
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
     deleted_at: Mapped[datetime | None] = mapped_column(default=None)
 
@@ -35,6 +36,8 @@ class MemoryFact(Base):
     qdrant_point_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     source: Mapped[str | None] = mapped_column(Text)
     version: Mapped[int] = mapped_column(nullable=False, server_default=text("1"), default=1)
+    access_count: Mapped[int] = mapped_column(nullable=False, server_default=text("0"), default=0)
+    last_accessed: Mapped[datetime | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
     updated_at: Mapped[datetime | None] = mapped_column(default=None)
     deleted_at: Mapped[datetime | None] = mapped_column(default=None)

@@ -110,3 +110,33 @@ async def _extract_facts_async(user_id: str, episode_id: str) -> None:
 
     from mirror.workers.tasks.profile import update_psych_profile
     update_psych_profile.delay(user_id)
+
+
+@celery_app.task(
+    name="mirror.workers.tasks.memory.decay_fact_importance",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=300,
+)
+def decay_fact_importance(self):
+    try:
+        asyncio.run(_decay_importance())
+    except Exception as exc:
+        raise self.retry(exc=exc)
+
+
+async def _decay_importance() -> None:
+    from mirror.db.session import ensure_db_pool
+    from sqlalchemy import text as sa_text
+    from mirror.db.session import get_session
+    await ensure_db_pool()
+    async with get_session() as session:
+        result = await session.execute(sa_text("""
+            UPDATE memory_facts
+            SET importance = GREATEST(0.1, importance - 0.02)
+            WHERE last_accessed < NOW() - INTERVAL '30 days'
+              AND importance > 0.1
+              AND deleted_at IS NULL
+        """))
+        await session.commit()
+        logger.info("memory.importance_decayed", rows=result.rowcount)
