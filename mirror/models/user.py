@@ -1,10 +1,9 @@
 import uuid
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, Index, Numeric, Text, Time, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import Boolean, CheckConstraint, Date, Float, ForeignKey, Index, Numeric, SmallInteger, Text, Time, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -75,6 +74,22 @@ class UserProfile(Base):
     dominant_themes: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     profile_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     profile_updated_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Stage 2 — Golden moment / onboarding (migration 021)
+    golden_moment_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    golden_moment_shown_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    preferred_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    partner_birth_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    registered_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    # Stage 2 — Numerology (migration 022)
+    life_path_number: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    # Stage 2 — Journal (migration 023)
+    journal_evening_time: Mapped[time | None] = mapped_column(Time, nullable=True, default=time(21, 0))
+    journal_notifications_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # Stage 2 — Proactive (migration 025)
+    proactive_mode: Mapped[str] = mapped_column(Text, nullable=False, default="normal", server_default="normal")
+    quiet_hours_start: Mapped[time | None] = mapped_column(Time, nullable=True, default=time(23, 0))
+    quiet_hours_end: Mapped[time | None] = mapped_column(Time, nullable=True, default=time(8, 0))
+    busy_probability: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.03)
     created_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(nullable=True)
 

@@ -38,8 +38,15 @@ class Transit:
     is_retrograde: bool
 
 
+@dataclass
+class SignificantTransit:
+    planet: str
+    description: str
+    significance: float  # 0.0-1.0
+
+
 class AstrologyService:
-    def __init__(self, llm_router, redis_client) -> None:
+    def __init__(self, llm_router, redis_client=None) -> None:
         self._llm = llm_router
         self._redis = redis_client
 
@@ -161,7 +168,7 @@ class AstrologyService:
         await self._save_natal_cache(user_id, natal_chart)
         return natal_chart
 
-    async def get_current_transits(self) -> list[Transit]:
+    async def get_current_transits(self, user_id: UUID | None = None) -> list[Transit]:
         now = datetime.now(timezone.utc)
         raw = await asyncio.to_thread(
             self._compute_transits_sync, now
@@ -181,7 +188,7 @@ class AstrologyService:
         lon: float | None = None,
     ) -> None:
         if lat is None or lon is None:
-            coords = await geocode_city(birth_city, self._redis) if birth_city else None
+            coords = await geocode_city(birth_city, self._redis) if (birth_city and self._redis) else None
             lat, lon = coords or (None, None)
         async with db_module.async_session_factory() as session:
             result = await session.execute(
@@ -262,6 +269,23 @@ class AstrologyService:
                     is_retrograde=getattr(obj, "retrograde", False),
                 ))
         return transits
+
+    async def get_significant_transit(self, user_id: UUID) -> SignificantTransit | None:
+        """Returns the most significant current transit for proactive messaging, or None."""
+        try:
+            transits = await self.get_current_transits()
+            if not transits:
+                return None
+            # Outer planets (Jupiter+) make for more meaningful proactive events
+            priority = {"Jupiter": 0.7, "Saturn": 0.75, "Uranus": 0.65, "Neptune": 0.6, "Pluto": 0.55}
+            for t in transits:
+                sig = priority.get(t.planet, 0.0)
+                if sig > 0:
+                    desc = f"{t.planet} в {t.sign}" + (" (ретроград)" if t.is_retrograde else "")
+                    return SignificantTransit(planet=t.planet, description=desc, significance=sig)
+        except Exception:
+            logger.warning("astrology.get_significant_transit_failed", user_id=str(user_id))
+        return None
 
     async def _get_profile(self, user_id: UUID) -> UserProfile | None:
         async with db_module.async_session_factory() as session:

@@ -8,11 +8,13 @@ from mirror.config import settings
 logger = structlog.get_logger()
 
 QDRANT_COLLECTIONS = {
-    "user_episodes":   {"size": 3072, "distance": Distance.COSINE},
-    "user_facts":      {"size": 3072, "distance": Distance.COSINE},
-    "knowledge_astro": {"size": 3072, "distance": Distance.COSINE},
-    "knowledge_tarot": {"size": 3072, "distance": Distance.COSINE},
-    "knowledge_psych": {"size": 3072, "distance": Distance.COSINE},
+    "user_episodes":        {"size": 3072, "distance": Distance.COSINE},
+    "user_facts":           {"size": 3072, "distance": Distance.COSINE},
+    "knowledge_astro":      {"size": 3072, "distance": Distance.COSINE},
+    "knowledge_tarot":      {"size": 3072, "distance": Distance.COSINE},
+    "knowledge_psych":      {"size": 3072, "distance": Distance.COSINE},
+    "knowledge_dreams":     {"size": 3072, "distance": Distance.COSINE},
+    "knowledge_numerology": {"size": 3072, "distance": Distance.COSINE},
 }
 
 

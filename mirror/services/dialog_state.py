@@ -9,6 +9,7 @@ class DialogState(TypedDict):
     message: str
     tier: str
     is_first_message: bool
+    is_returning_user: bool
 
     # after classify_intent
     intent: str | None
